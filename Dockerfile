@@ -1,16 +1,12 @@
-FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
+FROM python:3.11-slim
 
 WORKDIR /app
 
-# Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application
-COPY . .
+COPY api.py .
 
-# Expose port
 EXPOSE 8080
 
-# Run
-CMD ["python", "api_deploy.py"]
+CMD ["python", "api.py"]

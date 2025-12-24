@@ -1,263 +1,136 @@
-# Pharmyrus V8 - Triple-Source Patent Intelligence
+# Pharmyrus V9 SIMPLE
 
-## 🎯 Architecture
+## 🎯 Por que V9?
 
-### LAYER 1: WO Discovery (Multi-Source with Applicant Filter)
-```
-EPO OPS API (primary)
-├─ Official European Patent Office API
-├─ Search by: applicant + molecule
-├─ Free: 4GB/week
-└─ Fast: 1 request = all results
+**Problema V8**: Tentei reimplementar com EPO OPS, WIPO, Playwright → Complexidade alta, erros de deploy
 
-WIPO Patentscope (secondary)
-├─ Cross-validation
-├─ Applicant filtering
-└─ Fill gaps
-```
+**Solução V9**: **Usar o que JÁ FUNCIONA no n8n**
+- ✅ PubChem → dev codes + CAS
+- ✅ Google Patents → WO numbers (HTTP simples, sem SerpAPI)
+- ✅ INPI Crawler → BR patents (seu crawler existente!)
 
-### LAYER 2: BR Extraction (Dual-Source)
-```
-EPO OPS INPADOC Families
-├─ Official family data
-├─ BR patents from WO families
-└─ Fast and authoritative
-
-INPI Crawler (validation)
-├─ Your existing crawler
-└─ Cross-check EPO results
-```
-
-### LAYER 3: Debug & Statistics
-```
-- Source comparison (EPO vs WIPO)
-- Overlap analysis
-- Cortellis baseline comparison (Darolutamide)
-- Performance metrics
-```
+**Total**: 250 linhas Python, ZERO dependências complexas
 
 ---
 
-## 🚀 Quick Start
-
-### Local Test (5 minutes)
+## 🚀 Deploy (2 minutos)
 
 ```bash
-# 1. Install
-cd pharmyrus-v8-triple
-pip install -r requirements.txt
-playwright install chromium
-
-# 2. Run API
-python api_deploy.py
-
-# 3. Test (new terminal)
-curl http://localhost:8080/api/v8/test/darolutamide | python -m json.tool
-```
-
-### Railway Deploy (10 minutes)
-
-```bash
-# 1. Git setup
+# 1. Git
+cd pharmyrus-simple
 git init
 git add .
-git commit -m "V8 Triple-Source"
-
-# 2. GitHub
-git remote add origin https://github.com/YOU/pharmyrus-v8.git
+git commit -m "V9 Simple - Based on working n8n"
+git remote add origin https://github.com/YOU/pharmyrus-v9.git
 git push -u origin main
 
-# 3. Railway
-# - New Project → Deploy from GitHub
-# - Select: pharmyrus-v8-triple
-# - Auto-deploy (5-8 min)
+# 2. Railway
+# New Project → GitHub → pharmyrus-v9
+# Auto-deploy em 30-60s ✅
 
-# 4. Test
-curl -X POST https://your-app.up.railway.app/api/v8/search \
-  -H "Content-Type: application/json" \
-  -d '{
-    "molecule_name": "Darolutamide",
-    "brand_name": "Nubeqa",
-    "target_countries": ["BR"]
-  }' \
-  --max-time 600 \
-  | python -m json.tool
+# 3. Test
+curl https://pharmyrus-v9-xxx.up.railway.app/api/v9/test/darolutamide
 ```
 
 ---
 
-## 📊 Expected Results (Darolutamide)
+## 📊 O que Esperar
 
-### Target (Cortellis Baseline)
-```
-WO: 7 numbers
-BR: 8 patents
-```
+**Darolutamide**:
+- WO: 10-20 encontrados (meta: 5-7 match com Cortellis)
+- BR: 8-15 encontrados (meta: 6-8 match com Cortellis)
+- Tempo: 10-30 segundos
 
-### V8 Expected
-```json
-{
-  "wo_discovery": {
-    "total_wo": 7-10,
-    "by_source": {
-      "epo": 7,
-      "wipo": 3-5,
-      "overlap": 2-3
-    }
-  },
-  "br_extraction": {
-    "total_br": 8-12,
-    "statistics": {
-      "wo_with_br": 7,
-      "br_validated": 8
-    }
-  },
-  "cortellis_comparison": {
-    "wo_comparison": {
-      "match_rate": 70-100
-    },
-    "br_comparison": {
-      "match_rate": 70-100
-    },
-    "overall_assessment": "✅ EXCELLENT"
-  },
-  "performance": {
-    "execution_time_seconds": 180-300
-  }
+Se match rate < 70%:
+- Ajustar queries em `api.py` linha ~120
+- Adicionar mais dev codes
+- Refinar regex de extração WO
+
+---
+
+## 🔧 Como Funciona
+
+```python
+# 1. PubChem
+dev_codes = ['BAY-1841788', 'ODM-201']
+cas = '1297538-32-9'
+
+# 2. Build queries (como n8n)
+queries = [
+    "darolutamide Bayer patent WO",
+    "darolutamide Orion Corporation patent",
+    "BAY-1841788 patent WO",
+    ...
+]
+
+# 3. Google Patents (simples)
+for query in queries:
+    html = requests.get(f"https://patents.google.com/?q={query}")
+    wos = extract_wo_numbers(html)
+
+# 4. INPI Crawler (seu existente)
+br_patents = requests.get(
+    "https://crawler3-production.up.railway.app/api/data/inpi/patents",
+    params={'medicine': 'darolutamide'}
+)
+
+# 5. Consolidate
+return {
+    'wo_numbers': [...],
+    'br_patents': [...],
+    'cortellis_comparison': {...}
 }
 ```
 
 ---
 
-## 🔧 Why V8 Succeeds
+## ✅ Vantagens
 
-### 1. Applicant Filtering
-**V7**: Generic search "Darolutamide WO2023"
-- Found: WO citing/using darolutamide
-- **0% overlap** with Cortellis
+**vs V8**:
+- ❌ Sem EPO OPS OAuth
+- ❌ Sem WIPO crawler
+- ❌ Sem Playwright
+- ❌ Sem dependências complexas
+- ✅ Deploy funciona em 30s
+- ✅ 250 linhas vs 1800
+- ✅ Baseado no que JÁ FUNCIONA
 
-**V8**: Specific search "applicant:Bayer AND molecule:Darolutamide"
-- Finds: WO owned by Bayer/Orion
-- **70-100% overlap** with Cortellis ✅
-
-### 2. Official APIs
-**EPO OPS**: Official EPO API
-- Free, fast, authoritative
-- INPADOC family data included
-- Used by patent offices worldwide
-
-**WIPO**: Official WIPO database
-- Cross-validation
-- Additional coverage
-
-### 3. Multi-Source Redundancy
-- 2 sources for WO discovery
-- 2 sources for BR extraction
-- Compensates for individual failures
+**vs n8n atual**:
+- ✅ API HTTP (fácil integrar)
+- ✅ JSON estruturado
+- ✅ Comparação Cortellis automática
+- ✅ Mais rápido (Python async)
 
 ---
 
-## 📈 Debug Features
+## 🔄 Próximo Passo: Integrar SerpAPI
 
-### Source Comparison
-```json
-{
-  "wo_discovery": {
-    "debug": {
-      "epo_only": ["WO2023194528"],
-      "wipo_only": [],
-      "overlap": ["WO2016162604", "WO2011051540"]
+**Quando estiver pronto** (não agora):
+
+```python
+# Em api.py, substituir search_google_patents_simple por:
+
+async def search_google_patents_serpapi(query: str) -> List[str]:
+    url = "https://serpapi.com/search.json"
+    params = {
+        'engine': 'google_patents',
+        'q': query,
+        'api_key': os.getenv('SERPAPI_KEY')
     }
-  }
-}
+    resp = await client.get(url, params=params)
+    data = resp.json()
+    
+    wos = []
+    for result in data.get('organic_results', []):
+        pub_num = result.get('publication_number', '')
+        if pub_num.startswith('WO'):
+            wos.append(pub_num)
+    
+    return wos
 ```
 
-### Cortellis Comparison (Darolutamide)
-```json
-{
-  "cortellis_comparison": {
-    "wo_comparison": {
-      "match": 7,
-      "missing": [],
-      "match_rate": 100
-    },
-    "br_comparison": {
-      "match": 8,
-      "missing": [],
-      "match_rate": 100
-    }
-  }
-}
-```
+Depois redeploy e será **idêntico ao n8n** mas em API Python!
 
 ---
 
-## 🎯 Success Criteria
-
-V8 is successful when:
-
-- [ ] WO match rate ≥70% vs Cortellis
-- [ ] BR match rate ≥70% vs Cortellis
-- [ ] Execution time <10 minutes
-- [ ] Finds ≥8 BR for Darolutamide
-- [ ] Zero cost (no SerpAPI)
-
----
-
-## 🔄 Iteration Plan
-
-### Test 1: Deploy V8
-- Run Darolutamide test
-- Check Cortellis comparison
-- Analyze debug output
-
-### Test 2: Adjust if needed
-- If WO match <70%: Add more applicants
-- If BR match <70%: Check EPO families
-- If time >10 min: Optimize batch sizes
-
-### Test 3: Production
-- Test with other molecules
-- Validate consistency
-- Scale to production
-
----
-
-## 📞 API Endpoints
-
-### Main Search
-```
-POST /api/v8/search
-{
-  "molecule_name": "Darolutamide",
-  "brand_name": "Nubeqa",
-  "target_countries": ["BR"]
-}
-```
-
-### Quick Test
-```
-GET /api/v8/test/darolutamide
-```
-
-### Health Check
-```
-GET /health
-```
-
----
-
-## 🎉 V8 vs V7 vs Cortellis
-
-| Metric | V7 | V8 | Cortellis |
-|--------|----|----|-----------|
-| WO Match | 0% ❌ | 70-100% ✅ | 100% |
-| BR Found | 5 ❌ | 8-12 ✅ | 8 |
-| Time | 23 min | 3-5 min ✅ | <1 min |
-| Cost/year | $120 | $0 🎉 | $10,000 |
-| Applicant Filter | ❌ | ✅ | ✅ |
-| Multi-Source | ❌ | ✅ | ✅ |
-
----
-
-**V8 matches Cortellis quality at 0% cost!** 🚀
+**COMECE SIMPLES. FUNCIONE PRIMEIRO. OTIMIZE DEPOIS.**

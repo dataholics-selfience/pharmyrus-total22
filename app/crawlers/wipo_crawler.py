@@ -1,410 +1,195 @@
 """
-WIPO Patentscope Crawler - V7 Enhanced
-Advanced crawler for WIPO Patentscope with multiple search strategies
+WIPO Patentscope Crawler - FIXED VERSION
+Cross-validates EPO results and finds additional WO patents
 """
+
 import asyncio
-import random
-from typing import List, Dict, Optional, Set
-from playwright.async_api import async_playwright, Page
 import logging
+import random
+from typing import List, Dict, Optional
+from playwright.async_api import async_playwright, Page, Browser
 
 logger = logging.getLogger(__name__)
 
 
-class WIPOPatentscopeCrawler:
+class WIPOCrawler:
     """
-    Advanced WIPO Patentscope crawler with multiple search strategies
+    WIPO Patentscope crawler with applicant filtering
     
-    Strategies:
-    1. Simple search (EN field - English names)
-    2. Advanced search with operators (applicant + molecule)
-    3. Dev code search
-    4. CAS number search
-    5. IPC classification search
+    Purpose: Cross-validate EPO results and find additional WO
     """
     
-    USER_AGENTS = [
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
-    ]
+    SEARCH_URL = "https://patentscope.wipo.int/search/en/search.jsf"
     
     def __init__(self):
-        self.browser = None
-        self.context = None
-        self.base_url = "https://patentscope.wipo.int"
+        self.browser: Optional[Browser] = None
+        self.playwright = None
         
     async def __aenter__(self):
         await self.initialize()
         return self
         
-    async def __aexit__(self, *args):
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.cleanup()
-        
+    
     async def initialize(self):
-        """Initialize browser with stealth settings"""
-        playwright = await async_playwright().start()
-        
-        self.browser = await playwright.chromium.launch(
-            headless=True,
-            args=[
-                '--disable-blink-features=AutomationControlled',
-                '--disable-dev-shm-usage',
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-web-security',
-                '--disable-features=IsolateOrigins,site-per-process'
-            ]
-        )
-        
-        # Create context with realistic settings
-        self.context = await self.browser.new_context(
-            viewport={'width': 1920, 'height': 1080},
-            user_agent=random.choice(self.USER_AGENTS),
-            locale='en-US',
-            timezone_id='America/New_York',
-            permissions=['geolocation'],
-            geolocation={'latitude': 40.7128, 'longitude': -74.0060},
-            color_scheme='light',
-            extra_http_headers={
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Sec-Fetch-User': '?1',
-                'Cache-Control': 'max-age=0'
-            }
-        )
-        
+        """Initialize Playwright browser"""
         logger.info("✅ WIPO Patentscope crawler initialized")
         
+        self.playwright = await async_playwright().start()
+        
+        self.browser = await self.playwright.chromium.launch(
+            headless=True,
+            args=[
+                '--no-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-blink-features=AutomationControlled'
+            ]
+        )
+    
     async def cleanup(self):
-        """Cleanup browser resources"""
-        if self.context:
-            await self.context.close()
+        """Cleanup resources"""
         if self.browser:
             await self.browser.close()
-            
-    async def _add_stealth_scripts(self, page: Page):
-        """Add anti-detection scripts"""
-        await page.add_init_script("""
-            // Remove webdriver property
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            });
-            
-            // Mock plugins
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5]
-            });
-            
-            // Mock languages
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['en-US', 'en']
-            });
-            
-            // Add chrome object
-            window.chrome = {
-                runtime: {}
-            };
-            
-            // Mock permissions
-            const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = (parameters) => (
-                parameters.name === 'notifications' ?
-                    Promise.resolve({ state: Notification.permission }) :
-                    originalQuery(parameters)
-            );
-        """)
-        
-    async def search_by_molecule_and_applicant(
+        if self.playwright:
+            await self.playwright.stop()
+    
+    async def search_by_applicant(
         self,
-        molecule_name: str,
-        applicants: List[str] = None
-    ) -> Set[str]:
+        molecule: str,
+        applicants: List[str],
+        max_per_applicant: int = 20
+    ) -> Dict:
         """
-        Search WIPO by molecule name and applicants
+        Search WIPO by molecule + applicant
         
-        Strategy: (EN:molecule_name AND PA:applicant)
+        Args:
+            molecule: Molecule name
+            applicants: List of applicant companies
+            max_per_applicant: Max results per applicant
+            
+        Returns:
+            {
+                'wo_numbers': [...],
+                'statistics': {...}
+            }
         """
-        wo_numbers = set()
+        logger.info(f"🔍 WIPO Search: {molecule} by applicants")
         
-        if applicants is None:
-            applicants = ['Bayer', 'Orion', 'Pfizer', 'Novartis', 'Roche']
+        results = {
+            'wo_numbers': set(),
+            'statistics': {
+                'queries': 0,
+                'total_found': 0,
+                'by_applicant': {},
+                'errors': 0
+            }
+        }
         
         for applicant in applicants:
+            logger.info(f"   Searching: {applicant}")
+            
             try:
-                logger.info(f"   Searching WIPO: {molecule_name} + {applicant}")
+                wo_list = await self._search_single_applicant(molecule, applicant, max_per_applicant)
                 
-                page = await self.context.new_page()
-                await self._add_stealth_scripts(page)
+                results['wo_numbers'].update(wo_list)
+                results['statistics']['queries'] += 1
+                results['statistics']['by_applicant'][applicant] = len(wo_list)
+                results['statistics']['total_found'] += len(wo_list)
                 
-                # Build advanced search query
-                query = f'(EN:"{molecule_name}" OR ALLTXT:"{molecule_name}") AND PA:"{applicant}"'
-                search_url = f"{self.base_url}/search/en/search.jsf"
+                logger.info(f"      Found {len(wo_list)} WO from {applicant}")
                 
-                await page.goto(search_url, wait_until="networkidle", timeout=60000, timeout=60000)
-                await asyncio.sleep(random.uniform(1, 2))
-                
-                # Enter query in search box
-                await page.fill('input[name="simpleSearchQueryString"]', query)
-                await asyncio.sleep(random.uniform(0.5, 1))
-                
-                # Click search
-                await page.click('button[type="submit"]')
-                await page.wait_for_load_state('networkidle')
-                await asyncio.sleep(random.uniform(2, 3))
-                
-                # Extract WO numbers from results
-                wo_links = await page.query_selector_all('a[href*="/en/detail.jsf?docId="]')
-                
-                for link in wo_links:
-                    text = await link.text_content()
-                    if text and text.startswith('WO'):
-                        # Clean WO number
-                        wo_num = text.strip().split()[0]  # Get WO2016162604
-                        wo_numbers.add(wo_num)
-                        logger.info(f"      Found: {wo_num}")
-                
-                await page.close()
+                # Delay between queries
                 await asyncio.sleep(random.uniform(2, 4))
                 
             except Exception as e:
                 logger.warning(f"      Error searching {applicant}: {e}")
-                continue
+                results['statistics']['errors'] += 1
+                
+        results['wo_numbers'] = sorted(list(results['wo_numbers']))
         
-        return wo_numbers
+        logger.info(f"   ✅ WIPO Total: {len(results['wo_numbers'])} WO")
+        
+        return results
     
-    async def search_by_dev_code(self, dev_code: str) -> Set[str]:
-        """
-        Search WIPO by development code
-        
-        Strategy: ALLTXT:dev_code (searches all text fields)
-        """
-        wo_numbers = set()
-        
-        try:
-            logger.info(f"   Searching WIPO by dev code: {dev_code}")
-            
-            page = await self.context.new_page()
-            await self._add_stealth_scripts(page)
-            
-            # Simple search for dev code
-            query = f'ALLTXT:"{dev_code}"'
-            search_url = f"{self.base_url}/search/en/search.jsf"
-            
-            await page.goto(search_url, wait_until="networkidle", timeout=60000)
-            await asyncio.sleep(random.uniform(1, 2))
-            
-            await page.fill('input[name="simpleSearchQueryString"]', query)
-            await asyncio.sleep(random.uniform(0.5, 1))
-            
-            await page.click('button[type="submit"]')
-            await page.wait_for_load_state('networkidle')
-            await asyncio.sleep(random.uniform(2, 3))
-            
-            # Extract WO numbers
-            wo_links = await page.query_selector_all('a[href*="/en/detail.jsf?docId="]')
-            
-            for link in wo_links:
-                text = await link.text_content()
-                if text and text.startswith('WO'):
-                    wo_num = text.strip().split()[0]
-                    wo_numbers.add(wo_num)
-                    logger.info(f"      Found: {wo_num}")
-            
-            await page.close()
-            await asyncio.sleep(random.uniform(2, 4))
-            
-        except Exception as e:
-            logger.warning(f"      Error searching dev code: {e}")
-        
-        return wo_numbers
-    
-    async def search_by_cas(self, cas_number: str) -> Set[str]:
-        """
-        Search WIPO by CAS number
-        
-        Strategy: ALLTXT:cas_number
-        """
-        wo_numbers = set()
-        
-        try:
-            logger.info(f"   Searching WIPO by CAS: {cas_number}")
-            
-            page = await self.context.new_page()
-            await self._add_stealth_scripts(page)
-            
-            query = f'ALLTXT:"{cas_number}"'
-            search_url = f"{self.base_url}/search/en/search.jsf"
-            
-            await page.goto(search_url, wait_until="networkidle", timeout=60000)
-            await asyncio.sleep(random.uniform(1, 2))
-            
-            await page.fill('input[name="simpleSearchQueryString"]', query)
-            await asyncio.sleep(random.uniform(0.5, 1))
-            
-            await page.click('button[type="submit"]')
-            await page.wait_for_load_state('networkidle')
-            await asyncio.sleep(random.uniform(2, 3))
-            
-            wo_links = await page.query_selector_all('a[href*="/en/detail.jsf?docId="]')
-            
-            for link in wo_links:
-                text = await link.text_content()
-                if text and text.startswith('WO'):
-                    wo_num = text.strip().split()[0]
-                    wo_numbers.add(wo_num)
-                    logger.info(f"      Found: {wo_num}")
-            
-            await page.close()
-            await asyncio.sleep(random.uniform(2, 4))
-            
-        except Exception as e:
-            logger.warning(f"      Error searching CAS: {e}")
-        
-        return wo_numbers
-    
-    async def get_family_members(self, wo_number: str) -> Dict[str, List[str]]:
-        """
-        Get patent family members for a WO number
-        
-        Returns BR patents from the same family
-        """
-        family_members = {
-            'br_patents': [],
-            'us_patents': [],
-            'ep_patents': [],
-            'other': []
-        }
-        
-        try:
-            logger.info(f"   Getting family members for {wo_number}")
-            
-            page = await self.context.new_page()
-            await self._add_stealth_scripts(page)
-            
-            # Go to patent detail page
-            # WO2016162604 -> docId format
-            doc_id = wo_number.replace('-', '')  # Remove hyphens
-            detail_url = f"{self.base_url}/search/en/detail.jsf?docId={doc_id}"
-            
-            await page.goto(detail_url, wait_until="networkidle", timeout=60000)
-            await asyncio.sleep(random.uniform(2, 3))
-            
-            # Look for "National Phase Entries" or "Patent Family" section
-            # This varies by WIPO's UI, so we try multiple selectors
-            
-            # Try to find BR patents in the page
-            page_content = await page.content()
-            
-            # Look for BR patent numbers (BR followed by numbers)
-            import re
-            br_pattern = r'BR\s*[-/]?\s*(\d{12}|\d{9})'
-            br_matches = re.findall(br_pattern, page_content, re.IGNORECASE)
-            
-            for match in br_matches:
-                br_num = f"BR{match.replace('-', '').replace('/', '')}"
-                if br_num not in family_members['br_patents']:
-                    family_members['br_patents'].append(br_num)
-                    logger.info(f"      Found BR: {br_num}")
-            
-            await page.close()
-            await asyncio.sleep(random.uniform(1, 2))
-            
-        except Exception as e:
-            logger.warning(f"      Error getting family members: {e}")
-        
-        return family_members
-    
-    async def comprehensive_search(
+    async def _search_single_applicant(
         self,
-        molecule_name: str,
-        dev_codes: List[str] = None,
-        cas_number: str = None,
-        applicants: List[str] = None
-    ) -> Dict:
-        """
-        Comprehensive multi-strategy search
+        molecule: str,
+        applicant: str,
+        max_results: int
+    ) -> List[str]:
+        """Execute single WIPO search"""
         
-        Returns:
-        - wo_numbers: Set of WO numbers found
-        - br_patents: Dict mapping WO -> BR patents
-        - strategies_used: Which strategies found results
-        """
-        all_wo_numbers = set()
-        br_mapping = {}
-        strategies_used = []
-        
-        # Strategy 1: Molecule + Applicants
-        if applicants:
-            wo_set = await self.search_by_molecule_and_applicant(molecule_name, applicants)
-            if wo_set:
-                all_wo_numbers.update(wo_set)
-                strategies_used.append(f"molecule+applicant ({len(wo_set)} found)")
-        
-        # Strategy 2: Dev codes
-        if dev_codes:
-            for dev_code in dev_codes[:5]:  # Limit to 5
-                wo_set = await self.search_by_dev_code(dev_code)
-                if wo_set:
-                    all_wo_numbers.update(wo_set)
-                    strategies_used.append(f"dev_code:{dev_code} ({len(wo_set)} found)")
-        
-        # Strategy 3: CAS number
-        if cas_number:
-            wo_set = await self.search_by_cas(cas_number)
-            if wo_set:
-                all_wo_numbers.update(wo_set)
-                strategies_used.append(f"cas:{cas_number} ({len(wo_set)} found)")
-        
-        # For each WO, get BR family members
-        logger.info(f"\n   Getting BR family members for {len(all_wo_numbers)} WO patents...")
-        
-        for wo_num in list(all_wo_numbers)[:20]:  # Limit to 20 to avoid too long
-            family = await self.get_family_members(wo_num)
-            if family['br_patents']:
-                br_mapping[wo_num] = family['br_patents']
-        
-        return {
-            'wo_numbers': list(all_wo_numbers),
-            'br_mapping': br_mapping,
-            'strategies_used': strategies_used,
-            'total_wo_found': len(all_wo_numbers),
-            'total_br_found': sum(len(v) for v in br_mapping.values())
-        }
-
-
-# Test function
-async def test_wipo_crawler():
-    """Test WIPO crawler with Darolutamide"""
-    async with WIPOPatentscopeCrawler() as crawler:
-        results = await crawler.comprehensive_search(
-            molecule_name="Darolutamide",
-            dev_codes=["ODM-201", "BAY-1841788"],
-            cas_number="1297538-32-9",
-            applicants=["Bayer", "Orion"]
+        context = await self.browser.new_context(
+            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
         )
         
-        print("\n" + "="*80)
-        print("WIPO COMPREHENSIVE SEARCH RESULTS")
-        print("="*80)
-        print(f"\nWO Numbers Found: {results['total_wo_found']}")
-        print(f"BR Patents Found: {results['total_br_found']}")
-        print(f"\nStrategies Used:")
-        for strategy in results['strategies_used']:
-            print(f"  - {strategy}")
+        page = await context.new_page()
         
-        print(f"\nWO → BR Mapping:")
-        for wo, br_list in results['br_mapping'].items():
-            print(f"  {wo} → {', '.join(br_list)}")
+        # Stealth
+        await page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        """)
+        
+        try:
+            # Build advanced query
+            # EN = English title/abstract
+            # PA = Applicant
+            query = f'(EN:"{molecule}") AND PA:"{applicant}"'
+            
+            search_url = f"{self.WIPO_SEARCH_URL}?query={query}"
+            
+            # Navigate - FIXED: proper timeout syntax
+            await page.goto(search_url, wait_until='networkidle', timeout=90000)
+            
+            # Wait for results
+            await page.wait_for_selector('.result-list, .no-results', timeout=10000)
+            
+            # Extract WO numbers
+            wo_numbers = await page.evaluate("""
+                () => {
+                    const results = [];
+                    const links = document.querySelectorAll('a[href*="WO"]');
+                    
+                    links.forEach(link => {
+                        const text = link.textContent || '';
+                        const match = text.match(/WO[\\s-]?(\\d{4})[\\s\\/]?(\\d{6})/);
+                        if (match) {
+                            const wo = 'WO' + match[1] + match[2];
+                            if (!results.includes(wo)) {
+                                results.push(wo);
+                            }
+                        }
+                    });
+                    
+                    return results;
+                }
+            """)
+            
+            return wo_numbers[:max_results]
+            
+        finally:
+            await page.close()
+            await context.close()
+
+
+async def test_wipo():
+    """Test WIPO crawler"""
+    
+    async with WIPOCrawler() as wipo:
+        results = await wipo.search_by_applicant(
+            molecule="Darolutamide",
+            applicants=["Bayer", "Orion"],
+            max_per_applicant=10
+        )
+        
+        print(f"\nWIPO Results:")
+        print(f"  WO Found: {len(results['wo_numbers'])}")
+        print(f"  Statistics: {results['statistics']}")
+        
+        for wo in results['wo_numbers'][:10]:
+            print(f"    - {wo}")
 
 
 if __name__ == "__main__":
-    asyncio.run(test_wipo_crawler())
+    asyncio.run(test_wipo())

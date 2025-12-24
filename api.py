@@ -1,15 +1,23 @@
 """
-Pharmyrus V12 - SEQUENTIAL INPI Requests
-==========================================
+Pharmyrus V13 - GOOGLE PATENTS DIRETO
+======================================
 
-CORREÇÃO CRÍTICA vs V11:
-- V11: 27 requests PARALELOS → 500 errors (overload)
-- V12: 10-12 requests SEQUENCIAIS com delay → funciona!
+INSIGHT DO USUÁRIO (estava certo o tempo todo!):
+- Busca simples: "darolutamide wo site:patents.google.com"  
+- Funciona, acha WOs facilmente
+- Filtra por BR dentro do Google Patents
+- SIMPLES E EFICAZ!
 
-Estratégia:
-- PubChem → Dev codes, CAS
-- INPI SEQUENTIAL (10-12 queries PT com delay 1s)
-- Retry automático em caso de 500
+Por que V10/V11/V12 falharam?
+- Dependiam de INPI Crawler (rate limiting, 500 errors)
+- Overengineering com EPO API, Playwright, etc
+- NÃO usavam Google Patents diretamente!
+
+V13 - Estratégia do Usuário:
+1. PubChem → Dev codes
+2. SerpAPI Google Patents → WO numbers (DIRETO!)
+3. Para cada WO → Buscar família BR via SerpAPI  
+4. Skip INPI (não confiável)
 """
 
 from fastapi import FastAPI
@@ -19,44 +27,10 @@ import asyncio
 import re
 from urllib.parse import quote
 from datetime import datetime
-import time
 
-app = FastAPI(title="Pharmyrus V12", version="12.0.0")
+app = FastAPI(title="Pharmyrus V13", version="13.0.0")
 
-# ========================================
-# TRADUTOR PT
-# ========================================
-
-PT_TRANSLATIONS = {
-    'Darolutamide': 'Darolutamida',
-    'Abiraterone': 'Abiraterona',
-    'Enzalutamide': 'Enzalutamida',
-    'Apalutamide': 'Apalutamida',
-    'Olaparib': 'Olaparibe',
-    'Niraparib': 'Niraparibe',
-    'Venetoclax': 'Venetoclax',
-    'Axitinib': 'Axitinibe',
-    'Tivozanib': 'Tivozanibe',
-    'Trastuzumab': 'Trastuzumabe',
-    'Ixazomib': 'Ixazomibe',
-    'Sonidegib': 'Sonidegibe',
-}
-
-def translate_to_portuguese(molecule: str) -> str:
-    if molecule in PT_TRANSLATIONS:
-        return PT_TRANSLATIONS[molecule]
-    
-    pt = molecule
-    if pt.endswith('ide'):
-        pt = pt[:-3] + 'ida'
-    elif pt.endswith('ine'):
-        pt = pt[:-3] + 'ina'
-    elif pt.endswith('one'):
-        pt = pt[:-3] + 'ona'
-    elif pt.endswith('ib') and not pt.endswith('sib'):
-        pt = pt + 'e'
-    
-    return pt
+SERPAPI_KEY = "3f22448f4d43ce8259fa2f7f6385222323a67c4ce4e72fcc774b43d23812889d"
 
 # ========================================
 # PUBCHEM
@@ -69,226 +43,201 @@ async def get_pubchem_data(molecule: str) -> Dict[str, Any]:
         try:
             resp = await client.get(url)
             data = resp.json()
-            
             syns = data['InformationList']['Information'][0]['Synonym']
             
-            dev_codes = []
-            seen_devs = set()
-            for s in syns:
-                if re.match(r'^[A-Z]{2,5}[-\s]?\d{3,7}[A-Z]?$', s, re.I):
-                    clean = s.strip().upper()
-                    if clean not in seen_devs and len(dev_codes) < 15:
-                        seen_devs.add(clean)
-                        dev_codes.append(s)
+            dev_codes = [s for s in syns if re.match(r'^[A-Z]{2,5}[-\s]?\d{3,7}[A-Z]?$', s, re.I)][:10]
+            cas = next((s for s in syns if re.match(r'^\d{2,7}-\d{2}-\d$', s)), None)
             
-            cas = None
-            for s in syns:
-                if re.match(r'^\d{2,7}-\d{2}-\d$', s):
-                    cas = s
-                    break
-            
-            all_syns = [s for s in syns if len(s) > 3 and len(s) < 50][:50]
-            
-            return {
-                'dev_codes': dev_codes,
-                'cas': cas,
-                'all_synonyms': all_syns
-            }
-            
+            return {'dev_codes': dev_codes, 'cas': cas}
         except:
-            return {'dev_codes': [], 'cas': None, 'all_synonyms': []}
+            return {'dev_codes': [], 'cas': None}
 
 # ========================================
-# INPI CRAWLER (SEQUENTIAL!)
+# GOOGLE PATENTS - Estratégia do Usuário!
 # ========================================
 
-async def search_inpi_single(query: str, retry: int = 0) -> Dict[str, Any]:
+async def search_google_patents_wo(molecule: str, dev_codes: List[str]) -> List[str]:
     """
-    Busca INPI com RETRY automático
+    EXATAMENTE a estratégia do usuário:
+    - Query: "darolutamide wo site:patents.google.com"
+    - Extrai WO numbers dos resultados
     """
-    url = "https://crawler3-production.up.railway.app/api/data/inpi/patents"
+    print(f"\n[2/4] Google Patents: WO Discovery (estratégia do usuário!)")
     
-    async with httpx.AsyncClient(timeout=90.0) as client:
-        try:
-            params = {'medicine': query}
+    queries = [
+        f'{molecule} wo site:patents.google.com',
+        f'{molecule} patent wo site:patents.google.com',
+    ]
+    
+    # Add dev codes
+    for dev in dev_codes[:3]:
+        queries.append(f'{dev} wo site:patents.google.com')
+    
+    wo_numbers = set()
+    
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for query in queries[:5]:
+            try:
+                url = "https://serpapi.com/search.json"
+                params = {
+                    'engine': 'google',
+                    'q': query,
+                    'api_key': SERPAPI_KEY,
+                    'num': 20
+                }
+                
+                resp = await client.get(url, params=params)
+                data = resp.json()
+                
+                results = data.get('organic_results', [])
+                
+                for r in results:
+                    text = (r.get('title', '') + ' ' + 
+                           r.get('snippet', '') + ' ' + 
+                           r.get('link', ''))
+                    
+                    # Extrair WO numbers
+                    matches = re.findall(r'WO[\s-]?(\d{4})[\s/-]?(\d{6})', text, re.I)
+                    for year, num in matches:
+                        wo = f'WO{year}{num}'
+                        wo_numbers.add(wo)
+                
+                await asyncio.sleep(1.0)
+                
+            except Exception as e:
+                print(f"    ✗ Query '{query[:40]}...': {type(e).__name__}")
+    
+    wo_list = sorted(list(wo_numbers))
+    print(f"  → Found {len(wo_list)} WO numbers")
+    for wo in wo_list[:10]:
+        print(f"    • {wo}")
+    
+    return wo_list
+
+# ========================================
+# GOOGLE PATENTS - BR Family Search
+# ========================================
+
+async def get_br_from_wo(wo_number: str) -> List[Dict[str, Any]]:
+    """
+    Para cada WO, busca família BR
+    Como usuário fez: clicar em BR no Google Patents
+    """
+    url = "https://serpapi.com/search.json"
+    params = {
+        'engine': 'google_patents',
+        'q': wo_number,
+        'api_key': SERPAPI_KEY
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(url, params=params)
-            resp.raise_for_status()
             data = resp.json()
             
-            results = data.get('data', [])
-            
             br_patents = []
-            wo_numbers = []
             
-            for item in results:
-                br_num = item.get('title', '').strip()
-                
-                if br_num == 'Pedido' or not br_num.startswith('BR'):
+            # Procurar BR na família de patentes
+            worldwide = data.get('worldwide_applications', {})
+            
+            for year, apps in worldwide.items():
+                if not isinstance(apps, list):
                     continue
-                
-                real_title = item.get('applicant', '').strip()
-                filing_date = item.get('depositDate', '').strip()
-                full_text = item.get('fullText', '').strip()
-                
-                # Extrair WO do fullText
-                wo_matches = re.findall(r'WO[\s-]?(\d{4})[\s/-]?(\d{6})', full_text, re.I)
-                for year, num in wo_matches:
-                    wo = f'WO{year}{num}'
-                    if wo not in wo_numbers:
-                        wo_numbers.append(wo)
-                
-                br_patents.append({
-                    'br_number': br_num.replace(' ', ''),
-                    'title': real_title,
-                    'filing_date': filing_date,
-                    'full_text': full_text[:300],
-                    'link': f"https://busca.inpi.gov.br/pePI/servlet/PatenteServletController?Action=detail&CodPedido={br_num}",
-                    'source': f'inpi_{query[:20]}'
-                })
+                    
+                for app in apps:
+                    doc_id = app.get('document_id', '')
+                    
+                    if doc_id.startswith('BR'):
+                        title = app.get('title', '')
+                        link = app.get('link', f'https://patents.google.com/patent/{doc_id}')
+                        
+                        br_patents.append({
+                            'br_number': doc_id,
+                            'wo_origin': wo_number,
+                            'title': title,
+                            'link': link,
+                            'source': 'google_patents_family'
+                        })
             
-            if br_patents or wo_numbers:
-                print(f"    ✓ '{query}': {len(br_patents)} BR, {len(wo_numbers)} WO")
+            if br_patents:
+                print(f"    ✓ {wo_number} → {len(br_patents)} BR")
             
-            return {
-                'br_patents': br_patents,
-                'wo_numbers': wo_numbers,
-                'source': f'inpi:{query}'
-            }
+            return br_patents
             
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 500 and retry < 2:
-                print(f"    ⚠ '{query}': 500 error, retry {retry+1}/2...")
-                await asyncio.sleep(2)
-                return await search_inpi_single(query, retry + 1)
-            else:
-                print(f"    ✗ '{query}': HTTP {e.response.status_code}")
-                return {'br_patents': [], 'wo_numbers': [], 'source': f'inpi:{query}'}
-        except Exception as e:
-            print(f"    ✗ '{query}': {type(e).__name__}")
-            return {'br_patents': [], 'wo_numbers': [], 'source': f'inpi:{query}'}
+    except Exception as e:
+        print(f"    ✗ {wo_number}: {type(e).__name__}")
+        return []
 
-# ========================================
-# INPI SEQUENTIAL (NÃO PARALELO!)
-# ========================================
-
-async def inpi_sequential_search(molecule: str, pubchem_data: Dict) -> Dict[str, Any]:
+async def search_br_patents(wo_numbers: List[str]) -> List[Dict[str, Any]]:
     """
-    SEQUENTIAL INPI search com delay
-    
-    MUDANÇA CRÍTICA vs V11:
-    - V11: 27 paralelos → 500 errors
-    - V12: 10-12 sequenciais com delay → funciona!
+    Para cada WO, busca BRs (como usuário fez manualmente)
     """
-    queries = []
+    print(f"\n[3/4] Google Patents: BR Family Search")
     
-    # 1. Nome PT (PRIORITÁRIO!)
-    molecule_pt = translate_to_portuguese(molecule)
-    queries.append(molecule_pt)  # "Darolutamida"
-    queries.append(molecule_pt.lower())  # "darolutamida"
-    
-    # 2. Dev codes top 3
-    for dev in pubchem_data['dev_codes'][:3]:
-        queries.append(dev)
-    
-    # 3. CAS
-    if pubchem_data['cas']:
-        queries.append(pubchem_data['cas'])
-    
-    # 4. Nome original (se diferente)
-    if molecule != molecule_pt:
-        queries.append(molecule)
-        queries.append(molecule.lower())
-    
-    # 5. Synonyms relevantes (só 2)
-    for syn in pubchem_data['all_synonyms'][:2]:
-        if len(syn) > 5 and syn.lower() not in [q.lower() for q in queries]:
-            queries.append(syn)
-    
-    # Limitar a 12 queries MAX
-    queries = queries[:12]
-    
-    print(f"\n[2/3] INPI SEQUENTIAL: {len(queries)} queries (com delay)")
-    print(f"  Nome PT: {molecule_pt}")
-    
-    # EXECUTAR SEQUENCIALMENTE (não paralelo!)
     all_br = []
-    all_wo = []
     
-    for i, query in enumerate(queries):
-        # Buscar
-        result = await search_inpi_single(query)
-        
-        all_br.extend(result['br_patents'])
-        all_wo.extend(result['wo_numbers'])
-        
-        # DELAY entre requests (evita overload)
-        if i < len(queries) - 1:
-            await asyncio.sleep(1.0)  # 1 segundo entre requests
+    for wo in wo_numbers[:15]:  # Limitar a 15 WOs
+        br_list = await get_br_from_wo(wo)
+        all_br.extend(br_list)
+        await asyncio.sleep(1.0)  # Delay entre requests
     
     # Deduplicar
-    seen_br = set()
+    seen = set()
     unique_br = []
     for br in all_br:
         br_id = br['br_number'].upper().replace('-', '').replace(' ', '')
-        if br_id not in seen_br:
-            seen_br.add(br_id)
+        if br_id not in seen:
+            seen.add(br_id)
             unique_br.append(br)
     
-    unique_wo = list(dict.fromkeys(all_wo))
+    print(f"  → Found {len(unique_br)} unique BR patents")
     
-    print(f"  → Found {len(unique_br)} BR patents")
-    print(f"  → Found {len(unique_wo)} WO numbers")
-    
-    return {
-        'br_patents': unique_br,
-        'wo_numbers': unique_wo,
-        'queries_tested': len(queries),
-        'molecule_pt': molecule_pt
-    }
+    return unique_br
 
 # ========================================
 # ENDPOINT PRINCIPAL
 # ========================================
 
-@app.get("/api/v12/search/{molecule}")
+@app.get("/api/v13/search/{molecule}")
 async def search_molecule(molecule: str, brand: Optional[str] = None):
     """
-    V12 Patent Search - SEQUENTIAL INPI (não paralelo!)
+    V13 - ESTRATÉGIA DO USUÁRIO (simples e funciona!)
+    
+    1. PubChem → Dev codes
+    2. Google Patents Search → WO numbers (como usuário fez!)
+    3. Para cada WO → Buscar BR family (como usuário fez!)
+    4. Skip INPI (não é confiável)
     """
     start_time = datetime.now()
     
     print(f"\n{'='*60}")
-    print(f"V12 PATENT SEARCH: {molecule}")
+    print(f"V13 PATENT SEARCH: {molecule}")
+    print(f"Estratégia: GOOGLE PATENTS DIRETO (como usuário mostrou!)")
     print(f"{'='*60}")
     
     # 1. PubChem
-    print(f"\n[1/3] PubChem: {molecule}")
+    print(f"\n[1/4] PubChem")
     pubchem = await get_pubchem_data(molecule)
-    print(f"  → {len(pubchem['dev_codes'])} dev codes, CAS={pubchem['cas']}")
+    print(f"  → {len(pubchem['dev_codes'])} dev codes")
     
-    # 2. INPI SEQUENTIAL
-    inpi_result = await inpi_sequential_search(molecule, pubchem)
+    # 2. Google Patents → WOs (estratégia do usuário!)
+    wo_numbers = await search_google_patents_wo(molecule, pubchem['dev_codes'])
     
-    # 3. Skip Playwright por enquanto
-    all_wo = inpi_result['wo_numbers']
-    all_br = inpi_result['br_patents']
+    # 3. Para cada WO → BRs (estratégia do usuário!)
+    br_patents = await search_br_patents(wo_numbers)
     
-    if len(all_wo) < 3:
-        print(f"\n[3/3] Skipping Playwright (not implemented)")
-    else:
-        print(f"\n[3/3] Skipping Playwright (INPI found {len(all_wo)} WOs)")
+    print(f"\n[4/4] Skip INPI (Google Patents é suficiente!)")
     
     # Cortellis comparison
     expected_wos = []
-    expected_br = 8
     if molecule.lower() == 'darolutamide':
         expected_wos = [
             'WO2016162604', 'WO2011051540', 'WO2018162793',
             'WO2021229145', 'WO2023194528', 'WO2023222557', 'WO2023161458'
         ]
     
-    matched_wos = [wo for wo in all_wo if wo in expected_wos]
-    missing_wos = [wo for wo in expected_wos if wo not in all_wo]
+    matched_wos = [wo for wo in wo_numbers if wo in expected_wos]
+    missing_wos = [wo for wo in expected_wos if wo not in wo_numbers]
     
     match_rate = 0
     if expected_wos:
@@ -298,50 +247,61 @@ async def search_molecule(molecule: str, brand: Optional[str] = None):
     
     elapsed = (datetime.now() - start_time).total_seconds()
     
+    print(f"\n{'='*60}")
+    print(f"RESULTADO:")
+    print(f"  WOs: {len(wo_numbers)} (expected: {len(expected_wos)})")
+    print(f"  BRs: {len(br_patents)}")
+    print(f"  Match: {match_rate}% - {status}")
+    print(f"  Tempo: {elapsed:.1f}s")
+    print(f"{'='*60}")
+    
     return {
         "molecule_info": {
             "name": molecule,
-            "name_pt": inpi_result.get('molecule_pt', molecule),
             "brand": brand or "Unknown",
             "dev_codes": pubchem['dev_codes'],
             "cas": pubchem['cas']
         },
         "search_strategy": {
-            "mode": "V12 INPI SEQUENTIAL (não paralelo!)",
-            "sources": ["PubChem", "INPI Crawler SEQUENTIAL"],
-            "critical_fix": "Requests sequenciais com delay 1s (vs paralelo V11)",
-            "inpi_queries": inpi_result.get('queries_tested', 0)
+            "mode": "V13 - Google Patents Direto (estratégia do usuário!)",
+            "sources": [
+                "Google Patents (WO search) - COMO USUÁRIO FEZ!",
+                "Google Patents (BR family) - COMO USUÁRIO FEZ!",
+                "NO INPI (não confiável)"
+            ],
+            "why_this_works": "Usuário mostrou: busca direta funciona melhor que APIs complexas!",
+            "user_query_example": "darolutamide wo site:patents.google.com"
         },
         "wo_discovery": {
-            "total_wo": len(all_wo),
-            "wo_numbers": all_wo,
-            "source": "INPI Crawler (fullText extraction)"
+            "total_wo": len(wo_numbers),
+            "wo_numbers": wo_numbers,
+            "source": "Google Patents Search (SerpAPI)"
         },
         "br_patents": {
-            "total_br": len(all_br),
-            "patents": all_br
+            "total_br": len(br_patents),
+            "patents": br_patents
         },
         "performance": {
             "execution_time_seconds": round(elapsed, 2)
         },
         "cortellis_comparison": {
             "expected_wos": len(expected_wos),
-            "found_wos": len(all_wo),
+            "found_wos": len(wo_numbers),
             "matches": len(matched_wos),
             "match_rate": f"{match_rate}%",
             "matched_wos": matched_wos,
             "missing_wos": missing_wos,
-            "expected_br": expected_br,
-            "found_br": len(all_br),
+            "expected_br": 8,
+            "found_br": len(br_patents),
             "status": status
         }
     }
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "version": "12.0.0"}
+    return {"status": "healthy", "version": "13.0.0"}
 
-@app.get("/api/v12/test/darolutamide")
+@app.get("/api/v13/test/darolutamide")
 async def test_darolutamide():
     return await search_molecule("Darolutamide", "Nubeqa")
 

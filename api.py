@@ -51,39 +51,51 @@ async def get_pubchem_data(molecule: str) -> Dict[str, Any]:
 
 
 # ========================================
-# 2. GOOGLE PATENTS via requests
-# (SEM SerpAPI, SEM Playwright - apenas HTTP)
+# 2. GOOGLE SEARCH para encontrar WO numbers
+# (Igual ao n8n quando NÃO usa SerpAPI)
 # ========================================
 
-async def search_google_patents_simple(query: str) -> List[str]:
+async def search_wo_numbers_via_google(query: str) -> List[str]:
     """
-    Busca Google Patents via requests simples
-    Retorna lista de WO numbers
+    Busca WO numbers via Google Search comum
+    Extrai WO numbers dos resultados
     """
-    # Google Patents tem uma API pública básica
-    url = "https://patents.google.com/"
+    # Google Search aceita requests simples com user-agent
+    url = "https://www.google.com/search"
     
-    # Estratégia: usar o que funciona no n8n
-    # "darolutamide Bayer patent WO"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
     
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0, headers=headers, follow_redirects=True) as client:
         try:
             params = {
                 'q': query,
-                'oq': query
+                'num': 20
             }
-            resp = await client.get(url, params=params, follow_redirects=True)
+            resp = await client.get(url, params=params)
             
             # Extrair WO numbers do HTML
-            wo_pattern = r'WO[\s-]?(\d{4})[\s/]?(\d{6})'
-            matches = re.findall(wo_pattern, resp.text, re.I)
+            # Padrões: WO2016162604, WO 2016/162604, WO2016/162604
+            patterns = [
+                r'WO[\s-]?(\d{4})[\s/-]?(\d{6})',  # WO2016162604 ou WO 2016/162604
+                r'WO[\s-]?(\d{4})[\s/-](\d{6})',   # WO2016-162604
+            ]
             
-            wo_numbers = [f'WO{year}{num}' for year, num in matches]
-            wo_numbers = list(dict.fromkeys(wo_numbers))  # remove duplicates
+            wo_numbers = []
+            for pattern in patterns:
+                matches = re.findall(pattern, resp.text, re.I)
+                for year, num in matches:
+                    wo = f'WO{year}{num}'
+                    if wo not in wo_numbers:
+                        wo_numbers.append(wo)
+            
+            if wo_numbers:
+                print(f"    ✓ Found {len(wo_numbers)} WOs from: {query[:50]}")
             
             return wo_numbers[:20]
         except Exception as e:
-            print(f"Google Patents error: {e}")
+            print(f"    ✗ Google search error: {e}")
             return []
 
 
@@ -139,23 +151,30 @@ async def search_patents_simple(molecule: str, brand: str = "") -> Dict[str, Any
     print(f"[1/3] PubChem: {molecule}")
     pubchem = await get_pubchem_data(molecule)
     
-    # Phase 2: Build queries (como no n8n)
+    # Phase 2: Build queries (como no n8n - específico!)
     queries = []
     
-    # Query base
-    queries.append(f"{molecule} Bayer patent WO")
-    queries.append(f"{molecule} Orion Corporation patent")
+    # Queries específicas com fabricante + WO
+    queries.append(f'"{molecule}" "Bayer" "WO2016"')
+    queries.append(f'"{molecule}" "Bayer" "WO2018"')
+    queries.append(f'"{molecule}" "Bayer" "WO2021"')
+    queries.append(f'"{molecule}" "Bayer" "WO2023"')
+    queries.append(f'"{molecule}" "Orion" patent WO')
     
     if brand:
-        queries.append(f"{brand} patent WO")
+        queries.append(f'"{brand}" "Bayer" patent WO')
     
-    # Dev codes
-    for dev in pubchem['dev_codes'][:3]:
-        queries.append(f"{dev} patent WO")
+    # Dev codes com aspas (busca exata)
+    for dev in pubchem['dev_codes'][:2]:
+        queries.append(f'"{dev}" patent WO')
     
-    # Buscar WO numbers
-    print(f"[2/3] Google Patents: {len(queries)} queries")
-    wo_tasks = [search_google_patents_simple(q) for q in queries]
+    # CAS number
+    if pubchem['cas']:
+        queries.append(f'"{pubchem["cas"]}" patent WO')
+    
+    # Buscar WO numbers via Google Search
+    print(f"[2/3] Google Search: {len(queries)} queries")
+    wo_tasks = [search_wo_numbers_via_google(q) for q in queries]
     wo_results = await asyncio.gather(*wo_tasks)
     
     all_wos = []
@@ -201,7 +220,7 @@ async def search_patents_simple(molecule: str, brand: str = "") -> Dict[str, Any
         },
         'search_strategy': {
             'mode': 'V9 Simple - Based on working n8n workflow',
-            'sources': ['PubChem', 'Google Patents (simple)', 'INPI Crawler'],
+            'sources': ['PubChem', 'Google Search (WO extraction)', 'INPI Crawler'],
             'queries_used': queries
         },
         'wo_discovery': {

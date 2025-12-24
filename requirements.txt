@@ -1,0 +1,30 @@
+# V7 Enhanced - Requirements
+# Core framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+python-dotenv==1.0.0
+
+# Async support
+httpx==0.25.2
+aiohttp==3.9.1
+
+# Browser automation
+playwright==1.40.0
+selenium==4.16.0
+webdriver-manager==4.0.1
+
+# Data processing
+requests==2.31.0
+beautifulsoup4==4.12.2
+lxml==4.9.3
+
+# PubChem
+pubchempy==1.0.4
+
+# Logging
+python-json-logger==2.0.7
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1

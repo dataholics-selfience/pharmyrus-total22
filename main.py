@@ -49,12 +49,35 @@ class SearchResponse(BaseModel):
 async def startup():
     """Initialize crawler on startup"""
     global crawler
-    print("\n🚀 Starting Pharmyrus V17 Production...")
     
-    crawler = HighVolumeCrawler()
-    await crawler.initialize()
+    import os
+    port = os.environ.get("PORT", "8000")
     
-    print("✅ Pharmyrus V17 ready!")
+    print("\n" + "="*70)
+    print("🚀 PHARMYRUS V17 PRODUCTION STARTUP")
+    print("="*70)
+    print(f"📡 PORT: {port}")
+    print(f"🌐 Environment: {os.environ.get('RAILWAY_ENVIRONMENT', 'local')}")
+    print("="*70 + "\n")
+    
+    try:
+        print("🔧 Initializing crawler...")
+        crawler = HighVolumeCrawler()
+        
+        print("📦 Loading proxies...")
+        await crawler.initialize()
+        
+        print("\n" + "="*70)
+        print("✅ PHARMYRUS V17 READY!")
+        print(f"📊 Total proxies: {len(crawler.proxy_manager.proxies)}")
+        print(f"📊 Healthy proxies: {len(crawler.proxy_manager._get_healthy_proxies())}")
+        print("="*70 + "\n")
+        
+    except Exception as e:
+        print(f"\n❌ STARTUP FAILED: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 
 @app.get("/")
@@ -179,4 +202,6 @@ async def get_status():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import os
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)

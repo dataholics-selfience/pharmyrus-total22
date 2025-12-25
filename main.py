@@ -84,6 +84,23 @@ async def health():
     }
 
 
+@app.get("/api/v16/test/{molecule}")
+async def test_molecule(molecule: str):
+    """Simple test endpoint - returns mock data immediately"""
+    return {
+        "status": "success",
+        "molecule": molecule,
+        "test": True,
+        "message": "This is a test endpoint. Use POST /api/search for real searches.",
+        "system_info": {
+            "version": "16.1.0",
+            "engine": "httpx lightweight",
+            "proxies": len(crawler.proxies) if crawler else 0,
+            "keys": 14
+        }
+    }
+
+
 @app.post("/api/search", response_model=SearchResponse)
 async def search_molecule(request: SearchRequest):
     """

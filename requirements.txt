@@ -3,9 +3,8 @@ uvicorn[standard]==0.27.0
 pydantic==2.5.3
 httpx==0.26.0
 
-# Stealth crawlers
+# Stealth crawler
 playwright==1.41.0
-selenium==4.16.0
 
 # Utils
 python-dateutil==2.8.2

@@ -1,12 +1,11 @@
 """
 Multi-Layer Search Orchestrator
-Coordinates 3 fallback layers: Playwright → Selenium → HTTP
+Coordinates 2 fallback layers: Playwright → HTTP
 """
 import asyncio
 import httpx
 from typing import List, Dict, Any
 from app.services.playwright_crawler import PlaywrightCrawler
-from app.services.selenium_crawler import SeleniumCrawler
 from app.utils.delays import retry_with_backoff
 
 
@@ -15,16 +14,14 @@ class SearchOrchestrator:
     
     def __init__(self):
         self.playwright_crawler = None
-        self.selenium_crawler = None
         
     async def search_with_fallback(self, query: str) -> Dict[str, Any]:
         """
-        Search with automatic fallback through 3 layers
+        Search with automatic fallback through 2 layers
         
         Layers:
         1. Playwright (most powerful, CDP stealth)
-        2. Selenium (fallback, webdriver stealth)
-        3. HTTP requests (last resort, basic)
+        2. HTTP requests (last resort, basic)
         
         Args:
             query: Search query
@@ -58,31 +55,9 @@ class SearchOrchestrator:
             error_log.append(f"Playwright failed: {str(e)[:100]}")
             print(f"    ❌ Playwright failed: {str(e)[:100]}")
             
-        # Layer 2: Selenium (sync)
+        # Layer 2: HTTP (last resort)
         try:
-            print(f"  🔧 Layer 2: Selenium...")
-            if not self.selenium_crawler:
-                self.selenium_crawler = SeleniumCrawler()
-                self.selenium_crawler.start()
-                
-            results = self.selenium_crawler.search_google(query)
-            
-            if results:
-                layer_used = "selenium"
-                print(f"    ✅ Selenium SUCCESS: {len(results)} results")
-                return {
-                    'results': results,
-                    'layer': layer_used,
-                    'success': True,
-                    'errors': error_log
-                }
-        except Exception as e:
-            error_log.append(f"Selenium failed: {str(e)[:100]}")
-            print(f"    ❌ Selenium failed: {str(e)[:100]}")
-            
-        # Layer 3: HTTP (last resort)
-        try:
-            print(f"  🌐 Layer 3: HTTP...")
+            print(f"  🌐 Layer 2: HTTP...")
             results = await self._http_search(query)
             
             if results:
@@ -153,8 +128,6 @@ class SearchOrchestrator:
         """Cleanup resources"""
         if self.playwright_crawler:
             await self.playwright_crawler.stop()
-        if self.selenium_crawler:
-            self.selenium_crawler.stop()
 
 
 async def test_orchestrator():

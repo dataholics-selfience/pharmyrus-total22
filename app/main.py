@@ -1,6 +1,6 @@
 """
 Pharmyrus V15 - Patent Search with Real Crawlers
-Multi-layer stealth architecture (Playwright → Selenium → HTTP)
+Multi-layer stealth architecture (Playwright → HTTP)
 """
 import re
 import asyncio
@@ -36,8 +36,7 @@ async def search_patents(request: SearchRequest):
     
     Multi-layer fallback:
     1. Playwright (CDP stealth)
-    2. Selenium (webdriver stealth)
-    3. HTTP (basic fallback)
+    2. HTTP (basic fallback)
     """
     start_time = datetime.now()
     molecule = request.nome_molecula.strip()
@@ -116,7 +115,7 @@ async def search_patents(request: SearchRequest):
         "search_strategy": {
             "version": "V15 - Real Stealth Crawlers",
             "mode": "multi_layer_fallback",
-            "layers": ["Playwright (stealth)", "Selenium (fallback)", "HTTP (last resort)"],
+            "layers": ["Playwright (stealth)", "HTTP (fallback)"],
             "layer_stats": layer_stats,
             "techniques": [
                 "CDP anti-detection (hide navigator.webdriver)",

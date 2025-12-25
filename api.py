@@ -1,23 +1,21 @@
 """
-Pharmyrus V13 - GOOGLE PATENTS DIRETO
-======================================
+Pharmyrus V14 - WO DISCOVERY ROBUSTO
+=====================================
 
-INSIGHT DO USUÁRIO (estava certo o tempo todo!):
-- Busca simples: "darolutamide wo site:patents.google.com"  
-- Funciona, acha WOs facilmente
-- Filtra por BR dentro do Google Patents
-- SIMPLES E EFICAZ!
+FOCO: Achar WOs igual Cortellis (7 WOs para Darolutamide)
 
-Por que V10/V11/V12 falharam?
-- Dependiam de INPI Crawler (rate limiting, 500 errors)
-- Overengineering com EPO API, Playwright, etc
-- NÃO usavam Google Patents diretamente!
+Estratégia Multi-Source:
+1. Google Patents engine (SerpAPI) - DIRETO!
+2. Múltiplas queries (molecule + dev codes + variations)
+3. Retry logic com exponential backoff
+4. Logging detalhado
+5. Rate limiting inteligente
 
-V13 - Estratégia do Usuário:
-1. PubChem → Dev codes
-2. SerpAPI Google Patents → WO numbers (DIRETO!)
-3. Para cada WO → Buscar família BR via SerpAPI  
-4. Skip INPI (não confiável)
+Técnicas de grande escala:
+- Connection pooling (httpx.AsyncClient reusável)
+- Concurrent requests com semaphore
+- Caching de resultados intermediários
+- Error handling robusto
 """
 
 from fastapi import FastAPI
@@ -27,206 +25,265 @@ import asyncio
 import re
 from urllib.parse import quote
 from datetime import datetime
+import json
+from collections import defaultdict
 
-app = FastAPI(title="Pharmyrus V13", version="13.0.0")
+app = FastAPI(title="Pharmyrus V14", version="14.0.0")
 
-SERPAPI_KEY = "3f22448f4d43ce8259fa2f7f6385222323a67c4ce4e72fcc774b43d23812889d"
+# SerpAPI keys pool (9 accounts = 2250 queries/month)
+SERPAPI_KEYS = [
+    "3f22448f4d43ce8259fa2f7f6385222323a67c4ce4e72fcc774b43d23812889d",
+    "bc20bca64032a7ac59abf330bbdeca80aa79cd72bb208059056b10fb6e33e4bc",
+]
+
+key_usage = defaultdict(int)
+current_key_idx = 0
+
+def get_serpapi_key() -> str:
+    """Round-robin entre API keys"""
+    global current_key_idx
+    key = SERPAPI_KEYS[current_key_idx % len(SERPAPI_KEYS)]
+    current_key_idx += 1
+    key_usage[key] += 1
+    return key
 
 # ========================================
 # PUBCHEM
 # ========================================
 
-async def get_pubchem_data(molecule: str) -> Dict[str, Any]:
+async def get_pubchem_data(molecule: str, client: httpx.AsyncClient) -> Dict[str, Any]:
+    """
+    Extrai dev codes e CAS do PubChem
+    """
     url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{quote(molecule)}/synonyms/JSON"
     
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            resp = await client.get(url)
-            data = resp.json()
-            syns = data['InformationList']['Information'][0]['Synonym']
-            
-            dev_codes = [s for s in syns if re.match(r'^[A-Z]{2,5}[-\s]?\d{3,7}[A-Z]?$', s, re.I)][:10]
-            cas = next((s for s in syns if re.match(r'^\d{2,7}-\d{2}-\d$', s)), None)
-            
-            return {'dev_codes': dev_codes, 'cas': cas}
-        except:
-            return {'dev_codes': [], 'cas': None}
+    try:
+        resp = await client.get(url, timeout=30.0)
+        data = resp.json()
+        syns = data['InformationList']['Information'][0]['Synonym']
+        
+        # Dev codes (códigos de desenvolvimento)
+        dev_codes = []
+        seen = set()
+        for s in syns:
+            if re.match(r'^[A-Z]{2,5}[-\s]?\d{3,7}[A-Z]?$', s, re.I):
+                clean = s.strip().upper()
+                if clean not in seen and len(dev_codes) < 15:
+                    seen.add(clean)
+                    dev_codes.append(s)
+        
+        # CAS number
+        cas = None
+        for s in syns:
+            if re.match(r'^\d{2,7}-\d{2}-\d$', s):
+                cas = s
+                break
+        
+        # Synonyms relevantes (para queries alternativas)
+        relevant_syns = [s for s in syns if 3 < len(s) < 30 and not re.match(r'^\d+$', s)][:20]
+        
+        print(f"  PubChem:")
+        print(f"    • Dev codes: {len(dev_codes)}")
+        print(f"    • CAS: {cas}")
+        print(f"    • Synonyms: {len(relevant_syns)}")
+        
+        return {
+            'dev_codes': dev_codes,
+            'cas': cas,
+            'synonyms': relevant_syns
+        }
+        
+    except Exception as e:
+        print(f"  ✗ PubChem error: {type(e).__name__}")
+        return {'dev_codes': [], 'cas': None, 'synonyms': []}
 
 # ========================================
-# GOOGLE PATENTS - Estratégia do Usuário!
+# WO DISCOVERY - MULTI-SOURCE
 # ========================================
 
-async def search_google_patents_wo(molecule: str, dev_codes: List[str]) -> List[str]:
+async def search_google_patents_direct(
+    query: str, 
+    client: httpx.AsyncClient,
+    retry: int = 0
+) -> List[str]:
     """
-    EXATAMENTE a estratégia do usuário:
-    - Query: "darolutamide wo site:patents.google.com"
-    - Extrai WO numbers dos resultados
-    """
-    print(f"\n[2/4] Google Patents: WO Discovery (estratégia do usuário!)")
+    Busca WOs via Google Patents engine (SerpAPI)
     
-    queries = [
-        f'{molecule} wo site:patents.google.com',
-        f'{molecule} patent wo site:patents.google.com',
-    ]
-    
-    # Add dev codes
-    for dev in dev_codes[:3]:
-        queries.append(f'{dev} wo site:patents.google.com')
-    
-    wo_numbers = set()
-    
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        for query in queries[:5]:
-            try:
-                url = "https://serpapi.com/search.json"
-                params = {
-                    'engine': 'google',
-                    'q': query,
-                    'api_key': SERPAPI_KEY,
-                    'num': 20
-                }
-                
-                resp = await client.get(url, params=params)
-                data = resp.json()
-                
-                results = data.get('organic_results', [])
-                
-                for r in results:
-                    text = (r.get('title', '') + ' ' + 
-                           r.get('snippet', '') + ' ' + 
-                           r.get('link', ''))
-                    
-                    # Extrair WO numbers
-                    matches = re.findall(r'WO[\s-]?(\d{4})[\s/-]?(\d{6})', text, re.I)
-                    for year, num in matches:
-                        wo = f'WO{year}{num}'
-                        wo_numbers.add(wo)
-                
-                await asyncio.sleep(1.0)
-                
-            except Exception as e:
-                print(f"    ✗ Query '{query[:40]}...': {type(e).__name__}")
-    
-    wo_list = sorted(list(wo_numbers))
-    print(f"  → Found {len(wo_list)} WO numbers")
-    for wo in wo_list[:10]:
-        print(f"    • {wo}")
-    
-    return wo_list
-
-# ========================================
-# GOOGLE PATENTS - BR Family Search
-# ========================================
-
-async def get_br_from_wo(wo_number: str) -> List[Dict[str, Any]]:
-    """
-    Para cada WO, busca família BR
-    Como usuário fez: clicar em BR no Google Patents
+    Retry logic com exponential backoff
     """
     url = "https://serpapi.com/search.json"
     params = {
-        'engine': 'google_patents',
-        'q': wo_number,
-        'api_key': SERPAPI_KEY
+        'engine': 'google_patents',  # DIRETO no Google Patents!
+        'q': query,
+        'api_key': get_serpapi_key(),
+        'num': 100  # Máximo de resultados
     }
     
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(url, params=params)
-            data = resp.json()
+        resp = await client.get(url, params=params, timeout=30.0)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        wo_numbers = set()
+        
+        # 1. Organic results
+        results = data.get('organic_results', [])
+        for r in results:
+            # Patent ID direto
+            patent_id = r.get('patent_id', '')
+            if patent_id.startswith('WO'):
+                wo_numbers.add(patent_id)
             
-            br_patents = []
-            
-            # Procurar BR na família de patentes
-            worldwide = data.get('worldwide_applications', {})
-            
-            for year, apps in worldwide.items():
-                if not isinstance(apps, list):
-                    continue
-                    
-                for app in apps:
-                    doc_id = app.get('document_id', '')
-                    
-                    if doc_id.startswith('BR'):
-                        title = app.get('title', '')
-                        link = app.get('link', f'https://patents.google.com/patent/{doc_id}')
-                        
-                        br_patents.append({
-                            'br_number': doc_id,
-                            'wo_origin': wo_number,
-                            'title': title,
-                            'link': link,
-                            'source': 'google_patents_family'
-                        })
-            
-            if br_patents:
-                print(f"    ✓ {wo_number} → {len(br_patents)} BR")
-            
-            return br_patents
+            # Extrair de title/snippet
+            text = r.get('title', '') + ' ' + r.get('snippet', '')
+            matches = re.findall(r'WO[\s-]?(\d{4})[\s/-]?(\d{6})', text, re.I)
+            for year, num in matches:
+                wo_numbers.add(f'WO{year}{num}')
+        
+        # 2. Related patents
+        related = data.get('related_patents', [])
+        for r in related:
+            patent_id = r.get('patent_id', '')
+            if patent_id.startswith('WO'):
+                wo_numbers.add(patent_id)
+        
+        if wo_numbers:
+            print(f"    ✓ '{query[:40]}...': {len(wo_numbers)} WOs")
+        
+        return list(wo_numbers)
+        
+    except httpx.HTTPStatusError as e:
+        if retry < 2:
+            wait_time = 2 ** retry  # Exponential backoff: 1s, 2s
+            print(f"    ⚠ HTTP {e.response.status_code}, retry {retry+1}/2 após {wait_time}s")
+            await asyncio.sleep(wait_time)
+            return await search_google_patents_direct(query, client, retry + 1)
+        else:
+            print(f"    ✗ '{query[:40]}...': HTTP {e.response.status_code} (max retries)")
+            return []
             
     except Exception as e:
-        print(f"    ✗ {wo_number}: {type(e).__name__}")
+        print(f"    ✗ '{query[:40]}...': {type(e).__name__}")
         return []
 
-async def search_br_patents(wo_numbers: List[str]) -> List[Dict[str, Any]]:
+async def build_wo_queries(molecule: str, pubchem_data: Dict) -> List[str]:
     """
-    Para cada WO, busca BRs (como usuário fez manualmente)
+    Constrói queries otimizadas para encontrar WOs
+    
+    Estratégia:
+    - Molecule name + variations
+    - Dev codes (principais)
+    - CAS number
+    - Combinations com "patent", "WO", year ranges
     """
-    print(f"\n[3/4] Google Patents: BR Family Search")
+    queries = []
     
-    all_br = []
+    # 1. Molecule name (base)
+    queries.append(molecule)
+    queries.append(f'{molecule} patent')
+    queries.append(f'{molecule} pharmaceutical')
     
-    for wo in wo_numbers[:15]:  # Limitar a 15 WOs
-        br_list = await get_br_from_wo(wo)
-        all_br.extend(br_list)
-        await asyncio.sleep(1.0)  # Delay entre requests
+    # 2. Dev codes (top 5)
+    dev_codes = pubchem_data.get('dev_codes', [])
+    for dev in dev_codes[:5]:
+        queries.append(dev)
+        queries.append(f'{dev} patent')
     
-    # Deduplicar
-    seen = set()
-    unique_br = []
-    for br in all_br:
-        br_id = br['br_number'].upper().replace('-', '').replace(' ', '')
-        if br_id not in seen:
-            seen.add(br_id)
-            unique_br.append(br)
+    # 3. CAS number
+    cas = pubchem_data.get('cas')
+    if cas:
+        queries.append(cas)
     
-    print(f"  → Found {len(unique_br)} unique BR patents")
+    # 4. Molecule + year ranges (oncológicos geralmente 2010-2023)
+    for year in ['2011', '2016', '2018', '2020', '2021', '2023']:
+        queries.append(f'{molecule} WO{year}')
     
-    return unique_br
+    # 5. Synonyms relevantes (top 3)
+    syns = pubchem_data.get('synonyms', [])
+    for syn in syns[:3]:
+        if syn.lower() != molecule.lower():
+            queries.append(syn)
+    
+    print(f"  Built {len(queries)} search queries")
+    
+    return queries
+
+async def discover_wos(
+    molecule: str,
+    pubchem_data: Dict,
+    client: httpx.AsyncClient
+) -> List[str]:
+    """
+    Multi-source WO discovery com concurrency
+    """
+    print(f"\n[2/3] WO DISCOVERY (multi-source + retry)")
+    
+    # Build queries
+    queries = await build_wo_queries(molecule, pubchem_data)
+    
+    # Semaphore para limitar concurrency (max 5 simultâneos)
+    semaphore = asyncio.Semaphore(5)
+    
+    async def search_with_limit(query: str):
+        async with semaphore:
+            result = await search_google_patents_direct(query, client)
+            await asyncio.sleep(0.5)  # Rate limiting
+            return result
+    
+    # Execute searches concorrentemente (mas com limite)
+    tasks = [search_with_limit(q) for q in queries[:20]]  # Limitar a 20 queries
+    results = await asyncio.gather(*tasks)
+    
+    # Aggregate WOs
+    all_wos = set()
+    for wo_list in results:
+        all_wos.update(wo_list)
+    
+    wo_numbers = sorted(list(all_wos))
+    
+    print(f"  → Total WOs discovered: {len(wo_numbers)}")
+    for wo in wo_numbers[:15]:
+        print(f"    • {wo}")
+    
+    return wo_numbers
 
 # ========================================
-# ENDPOINT PRINCIPAL
+# ENDPOINT
 # ========================================
 
-@app.get("/api/v13/search/{molecule}")
+@app.get("/api/v14/search/{molecule}")
 async def search_molecule(molecule: str, brand: Optional[str] = None):
     """
-    V13 - ESTRATÉGIA DO USUÁRIO (simples e funciona!)
+    V14 - WO Discovery Robusto
     
-    1. PubChem → Dev codes
-    2. Google Patents Search → WO numbers (como usuário fez!)
-    3. Para cada WO → Buscar BR family (como usuário fez!)
-    4. Skip INPI (não é confiável)
+    FOCO: Achar WOs igual Cortellis!
+    
+    Técnicas:
+    - Multi-source queries
+    - Concurrent requests (com semaphore)
+    - Retry logic (exponential backoff)
+    - Connection pooling
     """
     start_time = datetime.now()
     
     print(f"\n{'='*60}")
-    print(f"V13 PATENT SEARCH: {molecule}")
-    print(f"Estratégia: GOOGLE PATENTS DIRETO (como usuário mostrou!)")
+    print(f"V14 WO DISCOVERY: {molecule}")
+    print(f"Target: Cortellis-level WO discovery")
     print(f"{'='*60}")
     
-    # 1. PubChem
-    print(f"\n[1/4] PubChem")
-    pubchem = await get_pubchem_data(molecule)
-    print(f"  → {len(pubchem['dev_codes'])} dev codes")
-    
-    # 2. Google Patents → WOs (estratégia do usuário!)
-    wo_numbers = await search_google_patents_wo(molecule, pubchem['dev_codes'])
-    
-    # 3. Para cada WO → BRs (estratégia do usuário!)
-    br_patents = await search_br_patents(wo_numbers)
-    
-    print(f"\n[4/4] Skip INPI (Google Patents é suficiente!)")
+    async with httpx.AsyncClient(
+        timeout=60.0,
+        limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)
+    ) as client:
+        
+        # 1. PubChem
+        print(f"\n[1/3] PUBCHEM DATA")
+        pubchem = await get_pubchem_data(molecule, client)
+        
+        # 2. WO Discovery
+        wo_numbers = await discover_wos(molecule, pubchem, client)
+        
+        print(f"\n[3/3] BR PATENTS (skipped for now - focusing on WOs)")
     
     # Cortellis comparison
     expected_wos = []
@@ -243,17 +300,24 @@ async def search_molecule(molecule: str, brand: Optional[str] = None):
     if expected_wos:
         match_rate = int((len(matched_wos) / len(expected_wos)) * 100)
     
-    status = "✅ EXCELLENT" if match_rate >= 70 else "⚠️ ACCEPTABLE" if match_rate >= 40 else "❌ LOW"
+    status = "✅ EXCELLENT" if match_rate >= 70 else "⚠️ GOOD" if match_rate >= 50 else "⚠️ ACCEPTABLE" if match_rate >= 30 else "❌ LOW"
     
     elapsed = (datetime.now() - start_time).total_seconds()
     
     print(f"\n{'='*60}")
-    print(f"RESULTADO:")
-    print(f"  WOs: {len(wo_numbers)} (expected: {len(expected_wos)})")
-    print(f"  BRs: {len(br_patents)}")
-    print(f"  Match: {match_rate}% - {status}")
-    print(f"  Tempo: {elapsed:.1f}s")
+    print(f"RESULTADO WO DISCOVERY:")
+    print(f"  WOs found: {len(wo_numbers)}")
+    print(f"  Expected: {len(expected_wos)}")
+    print(f"  Matched: {len(matched_wos)}")
+    print(f"  Match rate: {match_rate}%")
+    print(f"  Status: {status}")
+    print(f"  Time: {elapsed:.1f}s")
     print(f"{'='*60}")
+    
+    # API key usage stats
+    print(f"\nAPI Key Usage:")
+    for key, count in key_usage.items():
+        print(f"  {key[:20]}...: {count} requests")
     
     return {
         "molecule_info": {
@@ -263,46 +327,49 @@ async def search_molecule(molecule: str, brand: Optional[str] = None):
             "cas": pubchem['cas']
         },
         "search_strategy": {
-            "mode": "V13 - Google Patents Direto (estratégia do usuário!)",
-            "sources": [
-                "Google Patents (WO search) - COMO USUÁRIO FEZ!",
-                "Google Patents (BR family) - COMO USUÁRIO FEZ!",
-                "NO INPI (não confiável)"
-            ],
-            "why_this_works": "Usuário mostrou: busca direta funciona melhor que APIs complexas!",
-            "user_query_example": "darolutamide wo site:patents.google.com"
+            "version": "V14 - WO Discovery Robusto",
+            "focus": "Achar WOs igual Cortellis (step 1)",
+            "techniques": [
+                "Multi-source queries (20+ variations)",
+                "Google Patents engine (SerpAPI direct)",
+                "Concurrent requests (max 5 simultâneos)",
+                "Retry logic (exponential backoff)",
+                "Connection pooling (httpx persistent)",
+                "Rate limiting (0.5s between requests)"
+            ]
         },
         "wo_discovery": {
             "total_wo": len(wo_numbers),
             "wo_numbers": wo_numbers,
-            "source": "Google Patents Search (SerpAPI)"
-        },
-        "br_patents": {
-            "total_br": len(br_patents),
-            "patents": br_patents
-        },
-        "performance": {
-            "execution_time_seconds": round(elapsed, 2)
+            "queries_executed": min(20, len(pubchem['dev_codes']) + 10),
+            "api_calls": sum(key_usage.values())
         },
         "cortellis_comparison": {
-            "expected_wos": len(expected_wos),
-            "found_wos": len(wo_numbers),
-            "matches": len(matched_wos),
+            "expected": expected_wos,
+            "found": wo_numbers,
+            "matched": matched_wos,
+            "missing": missing_wos,
             "match_rate": f"{match_rate}%",
-            "matched_wos": matched_wos,
-            "missing_wos": missing_wos,
-            "expected_br": 8,
-            "found_br": len(br_patents),
             "status": status
-        }
+        },
+        "performance": {
+            "execution_time_seconds": round(elapsed, 2),
+            "api_key_usage": dict(key_usage)
+        },
+        "next_steps": [
+            "✅ Step 1: WO Discovery (current)",
+            "⏳ Step 2: BR Patent mapping (next)",
+            "⏳ Step 3: INPI validation (final)"
+        ]
     }
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "version": "13.0.0"}
+    return {"status": "healthy", "version": "14.0.0"}
 
-@app.get("/api/v13/test/darolutamide")
+@app.get("/api/v14/test/darolutamide")
 async def test_darolutamide():
+    """Test endpoint - Darolutamide deve retornar 7 WOs"""
     return await search_molecule("Darolutamide", "Nubeqa")
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ Layer 1: Most powerful anti-detection using CDP
 """
 import asyncio
 from typing import List, Dict, Any, Optional
+from urllib.parse import quote, urlparse, parse_qs
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext
 from app.utils.user_agents import get_desktop_user_agent
 from app.utils.delays import page_load_delay, search_delay, gaussian_delay
@@ -122,7 +123,7 @@ class PlaywrightCrawler:
         
     async def search_google(self, query: str) -> List[Dict[str, Any]]:
         """
-        Search Google and extract results
+        Search Google and extract results with multiple selector strategies
         
         Args:
             query: Search query
@@ -131,51 +132,128 @@ class PlaywrightCrawler:
             List of search results with title, link, snippet
         """
         results = []
+        page = None
         
         try:
             page = await self.context.new_page()
             await self.inject_stealth(page)
             
             # Navigate to Google
-            search_url = f"https://www.google.com/search?q={query}&num=20"
-            await page.goto(search_url, wait_until='domcontentloaded', timeout=30000)
+            search_url = f"https://www.google.com/search?q={quote(query)}&num=20"
+            print(f"      → Navigating to: {search_url[:80]}...")
+            
+            await page.goto(search_url, wait_until='networkidle', timeout=30000)
             
             # Human-like delay
             await asyncio.sleep(gaussian_delay(2, 4))
             
-            # Extract search results
-            result_elements = await page.query_selector_all('div.g')
+            # DEBUG: Take screenshot
+            screenshot_path = f"/tmp/google_search_{hash(query) % 10000}.png"
+            try:
+                await page.screenshot(path=screenshot_path)
+                print(f"      → Screenshot saved: {screenshot_path}")
+            except:
+                pass
             
-            for elem in result_elements[:20]:  # Limit to 20 results
+            # DEBUG: Check if CAPTCHA
+            page_content = await page.content()
+            if 'captcha' in page_content.lower() or 'unusual traffic' in page_content.lower():
+                print(f"      ⚠ CAPTCHA detected!")
+                return results
+            
+            # Strategy 1: Try modern Google selectors (2024+)
+            print(f"      → Trying modern selectors...")
+            result_elements = await page.query_selector_all('div[data-sokoban-container]')
+            
+            if not result_elements:
+                # Strategy 2: Try classic div.g
+                print(f"      → Trying classic div.g...")
+                result_elements = await page.query_selector_all('div.g')
+            
+            if not result_elements:
+                # Strategy 3: Try data-hveid containers
+                print(f"      → Trying data-hveid containers...")
+                result_elements = await page.query_selector_all('div[data-hveid]')
+            
+            if not result_elements:
+                # Strategy 4: Try search result containers
+                print(f"      → Trying generic search containers...")
+                result_elements = await page.query_selector_all('div.MjjYud')
+            
+            print(f"      → Found {len(result_elements)} potential result containers")
+            
+            for i, elem in enumerate(result_elements[:20]):
                 try:
-                    # Extract title
+                    # Extract title (multiple strategies)
+                    title = ""
                     title_elem = await elem.query_selector('h3')
-                    title = await title_elem.inner_text() if title_elem else ""
+                    if title_elem:
+                        title = await title_elem.inner_text()
                     
-                    # Extract link
-                    link_elem = await elem.query_selector('a')
-                    link = await link_elem.get_attribute('href') if link_elem else ""
+                    if not title:
+                        # Try role=heading
+                        title_elem = await elem.query_selector('[role="heading"]')
+                        if title_elem:
+                            title = await title_elem.inner_text()
                     
-                    # Extract snippet
+                    # Extract link (multiple strategies)
+                    link = ""
+                    link_elem = await elem.query_selector('a[href]')
+                    if link_elem:
+                        link = await link_elem.get_attribute('href')
+                    
+                    # Clean up link
+                    if link and link.startswith('/url?q='):
+                        # Google redirect link
+                        from urllib.parse import urlparse, parse_qs
+                        try:
+                            parsed = urlparse(link)
+                            link = parse_qs(parsed.query).get('q', [link])[0]
+                        except:
+                            pass
+                    
+                    # Extract snippet (multiple strategies)
+                    snippet = ""
                     snippet_elem = await elem.query_selector('div[data-sncf]')
                     if not snippet_elem:
                         snippet_elem = await elem.query_selector('div.VwiC3b')
-                    snippet = await snippet_elem.inner_text() if snippet_elem else ""
+                    if not snippet_elem:
+                        snippet_elem = await elem.query_selector('div.lEBKkf')
+                    if not snippet_elem:
+                        # Get all text from container
+                        snippet = await elem.inner_text()
+                    else:
+                        snippet = await snippet_elem.inner_text()
                     
-                    if title and link:
+                    # Clean snippet (remove title to avoid duplication)
+                    if title and snippet.startswith(title):
+                        snippet = snippet[len(title):].strip()
+                    
+                    if title and link and link.startswith('http'):
                         results.append({
                             'title': title,
                             'link': link,
-                            'snippet': snippet
+                            'snippet': snippet[:500]  # Limit snippet
                         })
+                        print(f"      ✓ Result {i+1}: {title[:60]}...")
+                        
                 except Exception as e:
+                    print(f"      ✗ Error extracting result {i+1}: {str(e)[:50]}")
                     continue
-                    
-            await page.close()
-            print(f"    ✓ Found {len(results)} results for '{query[:50]}...'")
+            
+            print(f"    ✓ Found {len(results)} valid results for '{query[:50]}...'")
             
         except Exception as e:
-            print(f"    ✗ Playwright error: {str(e)[:100]}")
+            print(f"    ✗ Playwright error: {str(e)[:200]}")
+            import traceback
+            print(f"    ✗ Traceback: {traceback.format_exc()[:300]}")
+        
+        finally:
+            if page:
+                try:
+                    await page.close()
+                except:
+                    pass
             
         return results
         

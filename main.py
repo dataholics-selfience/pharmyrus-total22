@@ -1,18 +1,21 @@
 """
-PHARMYRUS V16.1 - LIGHTWEIGHT API SERVICE
-FastAPI sem Playwright - Apenas httpx + proxies
+PHARMYRUS V17 - HIGH-VOLUME PRODUCTION API
+- IP diferente garantido
+- Quarentena automática
+- Paralelização
+- Coleta real de WOs e BRs
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 import asyncio
-from lightweight_crawler import LightweightCrawler
+from high_volume_crawler import HighVolumeCrawler
 
 app = FastAPI(
-    title="Pharmyrus V16.1 Lightweight",
-    description="Patent search with 14 API keys - NO Playwright",
-    version="16.1.0"
+    title="Pharmyrus V17 Production",
+    description="High-volume patent search with guaranteed IP rotation",
+    version="17.0.0"
 )
 
 # CORS
@@ -39,33 +42,35 @@ class SearchResponse(BaseModel):
     wo_numbers: List[str]
     br_numbers: List[str]
     summary: dict
+    proxy_stats: Optional[dict] = None
 
 
 @app.on_event("startup")
 async def startup():
     """Initialize crawler on startup"""
     global crawler
-    print("\n🚀 Starting Pharmyrus V16.1 Lightweight...")
+    print("\n🚀 Starting Pharmyrus V17 Production...")
     
-    crawler = LightweightCrawler()
+    crawler = HighVolumeCrawler()
     await crawler.initialize()
     
-    print("✅ Pharmyrus ready!")
+    print("✅ Pharmyrus V17 ready!")
 
 
 @app.get("/")
 async def root():
     """Health check"""
     return {
-        "service": "Pharmyrus V16.1 Lightweight",
+        "service": "Pharmyrus V17 Production",
         "status": "online",
-        "version": "16.1.0",
+        "version": "17.0.0",
         "features": [
-            "14 API keys pool (5 WebShare + 3 ProxyScrape + 6 ScrapingBee)",
-            "200+ proxies rotating",
-            "httpx async requests (NO Playwright)",
-            "WO + BR number extraction",
-            "Lightweight deployment"
+            "14 API keys pool",
+            "200+ proxies with rotation",
+            "IP diferente garantido por consulta",
+            "Quarentena automática (3 falhas = 5 min ban)",
+            "Paralelização (até 5 queries simultâneas)",
+            "Coleta real de WOs e BRs"
         ]
     }
 
@@ -76,26 +81,36 @@ async def health():
     if not crawler:
         return {"status": "initializing"}
     
+    proxy_status = crawler.proxy_manager.get_status()
+    
     return {
         "status": "healthy",
-        "proxies_available": len(crawler.proxies),
-        "key_pool_status": "active",
-        "engine": "httpx (lightweight)"
+        "total_proxies": proxy_status['total_proxies'],
+        "healthy_proxies": proxy_status['healthy_proxies'],
+        "quarantined_proxies": proxy_status['quarantined_proxies'],
+        "global_success_rate": f"{proxy_status['global_success_rate']*100:.1f}%",
+        "version": "17.0.0"
     }
 
 
-@app.get("/api/v16/test/{molecule}")
+@app.get("/api/v17/test/{molecule}")
 async def test_molecule(molecule: str):
-    """Simple test endpoint - returns mock data immediately"""
+    """Quick test endpoint"""
+    if not crawler:
+        raise HTTPException(status_code=503, detail="Crawler not initialized")
+    
+    proxy_status = crawler.proxy_manager.get_status()
+    
     return {
         "status": "success",
         "molecule": molecule,
         "test": True,
-        "message": "This is a test endpoint. Use POST /api/search for real searches.",
+        "message": "System ready. Use POST /api/search for real searches.",
         "system_info": {
-            "version": "16.1.0",
-            "engine": "httpx lightweight",
-            "proxies": len(crawler.proxies) if crawler else 0,
+            "version": "17.0.0",
+            "total_proxies": proxy_status['total_proxies'],
+            "healthy_proxies": proxy_status['healthy_proxies'],
+            "quarantined_proxies": proxy_status['quarantined_proxies'],
             "keys": 14
         }
     }
@@ -104,15 +119,19 @@ async def test_molecule(molecule: str):
 @app.post("/api/search", response_model=SearchResponse)
 async def search_molecule(request: SearchRequest):
     """
-    Search for molecule patents
+    HIGH-VOLUME search for molecule patents
     
-    Returns WO numbers and BR numbers
+    Features:
+    - Parallel execution (5 concurrent queries)
+    - IP rotation guaranteed
+    - Quarantine bad proxies automatically
+    - Real WO + BR collection
     """
     if not crawler:
         raise HTTPException(status_code=503, detail="Crawler not initialized")
     
     try:
-        result = await crawler.search_molecule(
+        result = await crawler.search_molecule_parallel(
             molecule=request.nome_molecula,
             dev_codes=request.dev_codes or []
         )
@@ -123,41 +142,38 @@ async def search_molecule(request: SearchRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/status")
-async def get_status():
-    """Get key pool status"""
+@app.get("/api/proxy/status")
+async def get_proxy_status():
+    """Get detailed proxy pool status"""
     if not crawler:
         raise HTTPException(status_code=503, detail="Crawler not initialized")
     
-    # Get stats from key pool
-    stats = {
+    return crawler.proxy_manager.get_status()
+
+
+@app.get("/api/status")
+async def get_status():
+    """Get complete system status"""
+    if not crawler:
+        raise HTTPException(status_code=503, detail="Crawler not initialized")
+    
+    proxy_status = crawler.proxy_manager.get_status()
+    
+    # Key pool stats
+    key_stats = {
         'total_keys': len(crawler.key_pool.keys),
-        'total_proxies': len(crawler.proxies),
         'total_requests': crawler.key_pool.total_requests,
         'total_success': crawler.key_pool.total_success,
-        'total_failures': crawler.key_pool.total_failures,
-        'engine': 'httpx (lightweight - NO Playwright)'
+        'total_failures': crawler.key_pool.total_failures
     }
     
-    # Group by service
-    by_service = {}
-    for key in crawler.key_pool.keys:
-        if key.service not in by_service:
-            by_service[key.service] = {
-                'count': 0,
-                'quota_total': 0,
-                'quota_used': 0,
-                'quota_remaining': 0
-            }
-        
-        by_service[key.service]['count'] += 1
-        by_service[key.service]['quota_total'] += key.quota_limit
-        by_service[key.service]['quota_used'] += key.used_count
-        by_service[key.service]['quota_remaining'] += key.quota_remaining
-    
     return {
-        'global': stats,
-        'by_service': by_service
+        'system': {
+            'version': '17.0.0',
+            'engine': 'httpx + advanced proxy rotation'
+        },
+        'keys': key_stats,
+        'proxies': proxy_status
     }
 
 

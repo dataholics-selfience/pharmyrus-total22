@@ -1,18 +1,18 @@
 """
-PHARMYRUS V16 - PRODUCTION API SERVICE
-FastAPI com pool de 14 keys integrado
+PHARMYRUS V16.1 - LIGHTWEIGHT API SERVICE
+FastAPI sem Playwright - Apenas httpx + proxies
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 import asyncio
-from production_crawler import ProductionCrawler
+from lightweight_crawler import LightweightCrawler
 
 app = FastAPI(
-    title="Pharmyrus V16 Production",
-    description="Patent search with 14 API keys pool",
-    version="16.0.0"
+    title="Pharmyrus V16.1 Lightweight",
+    description="Patent search with 14 API keys - NO Playwright",
+    version="16.1.0"
 )
 
 # CORS
@@ -45,9 +45,9 @@ class SearchResponse(BaseModel):
 async def startup():
     """Initialize crawler on startup"""
     global crawler
-    print("\n🚀 Starting Pharmyrus V16 Production...")
+    print("\n🚀 Starting Pharmyrus V16.1 Lightweight...")
     
-    crawler = ProductionCrawler()
+    crawler = LightweightCrawler()
     await crawler.initialize()
     
     print("✅ Pharmyrus ready!")
@@ -57,14 +57,15 @@ async def startup():
 async def root():
     """Health check"""
     return {
-        "service": "Pharmyrus V16 Production",
+        "service": "Pharmyrus V16.1 Lightweight",
         "status": "online",
-        "version": "16.0.0",
+        "version": "16.1.0",
         "features": [
             "14 API keys pool (5 WebShare + 3 ProxyScrape + 6 ScrapingBee)",
-            "Automatic proxy rotation",
+            "200+ proxies rotating",
+            "httpx async requests (NO Playwright)",
             "WO + BR number extraction",
-            "Stealth mode"
+            "Lightweight deployment"
         ]
     }
 
@@ -78,7 +79,8 @@ async def health():
     return {
         "status": "healthy",
         "proxies_available": len(crawler.proxies),
-        "key_pool_status": "active"
+        "key_pool_status": "active",
+        "engine": "httpx (lightweight)"
     }
 
 
@@ -116,7 +118,8 @@ async def get_status():
         'total_proxies': len(crawler.proxies),
         'total_requests': crawler.key_pool.total_requests,
         'total_success': crawler.key_pool.total_success,
-        'total_failures': crawler.key_pool.total_failures
+        'total_failures': crawler.key_pool.total_failures,
+        'engine': 'httpx (lightweight - NO Playwright)'
     }
     
     # Group by service

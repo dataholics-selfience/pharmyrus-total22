@@ -1,21 +1,23 @@
 """
-PHARMYRUS V17 - HIGH-VOLUME PRODUCTION API
-- IP diferente garantido
-- Quarentena automática
-- Paralelização
-- Coleta real de WOs e BRs
+PHARMYRUS V18 - ULTRA-RESILIENT PRODUCTION API
+FastAPI + Ultra-Resilient Crawler + 14 Keys + Quarantine System
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict
 import asyncio
-from high_volume_crawler import HighVolumeCrawler
+import os
+
+from advanced_proxy_manager import AdvancedProxyManager
+from key_pool_manager import KeyPoolManager
+from ultra_resilient_crawler import UltraResilientCrawler
+
 
 app = FastAPI(
-    title="Pharmyrus V17 Production",
-    description="High-volume patent search with guaranteed IP rotation",
-    version="17.0.0"
+    title="Pharmyrus V18 Ultra-Resilient",
+    description="5-layer cascade patent search with 14 API keys",
+    version="18.0.0"
 )
 
 # CORS
@@ -27,7 +29,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global crawler instance
+# Global instances
+proxy_manager = None
 crawler = None
 
 
@@ -41,100 +44,102 @@ class SearchResponse(BaseModel):
     molecule: str
     wo_numbers: List[str]
     br_numbers: List[str]
-    summary: dict
-    proxy_stats: Optional[dict] = None
+    summary: Dict
 
 
 @app.on_event("startup")
 async def startup():
-    """Initialize crawler on startup"""
-    global crawler
+    """Initialize system on startup"""
+    global proxy_manager, crawler
     
-    import os
-    port = os.environ.get("PORT", "8000")
+    port = os.environ.get("PORT", 8000)
     
-    print("\n" + "="*70)
-    print("🚀 PHARMYRUS V17 PRODUCTION STARTUP")
-    print("="*70)
+    print("=" * 70)
+    print("🚀 PHARMYRUS V18 ULTRA-RESILIENT STARTUP")
+    print("=" * 70)
     print(f"📡 PORT: {port}")
-    print(f"🌐 Environment: {os.environ.get('RAILWAY_ENVIRONMENT', 'local')}")
-    print("="*70 + "\n")
+    print(f"🌐 Environment: production")
+    print("=" * 70)
     
-    try:
-        print("🔧 Initializing crawler...")
-        crawler = HighVolumeCrawler()
-        
-        print("📦 Loading proxies...")
-        await crawler.initialize()
-        
-        print("\n" + "="*70)
-        print("✅ PHARMYRUS V17 READY!")
-        print(f"📊 Total proxies: {len(crawler.proxy_manager.proxies)}")
-        print(f"📊 Healthy proxies: {len(crawler.proxy_manager._get_healthy_proxies())}")
-        print("="*70 + "\n")
-        
-    except Exception as e:
-        print(f"\n❌ STARTUP FAILED: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise
+    # Initialize proxy manager
+    print("\n🔧 Initializing proxy manager...")
+    proxy_manager = AdvancedProxyManager()
+    await proxy_manager.initialize()
+    
+    # Get all proxies
+    all_proxies = proxy_manager.get_all_proxies()
+    
+    print(f"✅ Proxy manager ready: {len(all_proxies)} proxies")
+    
+    # Initialize ultra-resilient crawler
+    print("\n🔧 Initializing ULTRA-RESILIENT crawler...")
+    print("   - 5 cascade strategies")
+    print("   - Automatic quarantine")
+    print("   - Multiple retry layers")
+    print("   - Exponential backoff")
+    
+    crawler = UltraResilientCrawler(all_proxies)
+    
+    print("✅ Crawler ready!")
+    
+    print("\n" + "=" * 70)
+    print("✅ PHARMYRUS V18 READY!")
+    print(f"📊 Total proxies: {len(all_proxies)}")
+    print(f"📊 Healthy proxies: {len(all_proxies) - len(crawler.quarantined_proxies)}")
+    print("=" * 70 + "\n")
 
 
 @app.get("/")
 async def root():
-    """Health check"""
+    """Root endpoint"""
     return {
-        "service": "Pharmyrus V17 Production",
+        "service": "Pharmyrus V18 Ultra-Resilient",
         "status": "online",
-        "version": "17.0.0",
+        "version": "18.0.0",
         "features": [
+            "5-layer cascade strategy",
             "14 API keys pool",
-            "200+ proxies with rotation",
-            "IP diferente garantido por consulta",
-            "Quarentena automática (3 falhas = 5 min ban)",
-            "Paralelização (até 5 queries simultâneas)",
-            "Coleta real de WOs e BRs"
+            "200+ proxies with quarantine",
+            "Exponential backoff retry",
+            "Multiple WO/BR extraction patterns",
+            "Google Patents + Espacenet + WIPO + Lens.org"
         ]
     }
 
 
 @app.get("/health")
 async def health():
-    """Detailed health check"""
-    if not crawler:
+    """Health check"""
+    if not crawler or not proxy_manager:
         return {"status": "initializing"}
     
-    proxy_status = crawler.proxy_manager.get_status()
+    all_proxies = proxy_manager.get_all_proxies()
+    healthy = len(all_proxies) - len(crawler.quarantined_proxies)
     
     return {
         "status": "healthy",
-        "total_proxies": proxy_status['total_proxies'],
-        "healthy_proxies": proxy_status['healthy_proxies'],
-        "quarantined_proxies": proxy_status['quarantined_proxies'],
-        "global_success_rate": f"{proxy_status['global_success_rate']*100:.1f}%",
-        "version": "17.0.0"
+        "total_proxies": len(all_proxies),
+        "healthy_proxies": healthy,
+        "quarantined_proxies": len(crawler.quarantined_proxies),
+        "total_requests": crawler.total_requests,
+        "success_rate": f"{(crawler.successful_requests / crawler.total_requests * 100) if crawler.total_requests > 0 else 0:.1f}%"
     }
 
 
-@app.get("/api/v17/test/{molecule}")
-async def test_molecule(molecule: str):
-    """Quick test endpoint"""
-    if not crawler:
-        raise HTTPException(status_code=503, detail="Crawler not initialized")
-    
-    proxy_status = crawler.proxy_manager.get_status()
-    
+@app.get("/api/v18/test/{molecule}")
+async def test_search(molecule: str):
+    """Test endpoint (doesn't consume quota)"""
     return {
         "status": "success",
         "molecule": molecule,
         "test": True,
         "message": "System ready. Use POST /api/search for real searches.",
         "system_info": {
-            "version": "17.0.0",
-            "total_proxies": proxy_status['total_proxies'],
-            "healthy_proxies": proxy_status['healthy_proxies'],
-            "quarantined_proxies": proxy_status['quarantined_proxies'],
-            "keys": 14
+            "version": "18.0.0",
+            "total_proxies": len(proxy_manager.get_all_proxies()) if proxy_manager else 0,
+            "healthy_proxies": len(proxy_manager.get_all_proxies()) - len(crawler.quarantined_proxies) if crawler else 0,
+            "quarantined_proxies": len(crawler.quarantined_proxies) if crawler else 0,
+            "strategies": 5
         }
     }
 
@@ -142,66 +147,131 @@ async def test_molecule(molecule: str):
 @app.post("/api/search", response_model=SearchResponse)
 async def search_molecule(request: SearchRequest):
     """
-    HIGH-VOLUME search for molecule patents
+    Search for WO and BR patent numbers
     
-    Features:
-    - Parallel execution (5 concurrent queries)
-    - IP rotation guaranteed
-    - Quarantine bad proxies automatically
-    - Real WO + BR collection
+    Uses 5-layer cascade strategy:
+    1. Google Patents direct
+    2. Google Search + site filter
+    3. Espacenet
+    4. WIPO Patentscope
+    5. Lens.org
     """
     if not crawler:
         raise HTTPException(status_code=503, detail="Crawler not initialized")
     
+    print(f"\n{'='*70}")
+    print(f"🔬 HIGH-VOLUME SEARCH: {request.nome_molecula}")
+    print(f"{'='*70}")
+    
     try:
-        result = await crawler.search_molecule_parallel(
+        # Build queries
+        queries = [
+            f"{request.nome_molecula} patent",
+            f"{request.nome_molecula} WO2011",
+            f"{request.nome_molecula} WO2016",
+            f"{request.nome_molecula} WO2018",
+            f"{request.nome_molecula} WO2020",
+            f"{request.nome_molecula} WO2021",
+            f"{request.nome_molecula} WO2023",
+        ]
+        
+        if request.dev_codes:
+            for code in request.dev_codes[:3]:
+                queries.append(f"{code} patent WO")
+        
+        print(f"📊 Executing {len(queries)} queries with CASCADE strategy...")
+        
+        # Search WO numbers with cascade
+        all_wo_numbers = set()
+        
+        for i, query in enumerate(queries, 1):
+            print(f"\n[{i}/{len(queries)}] Query: {query}")
+            
+            wo_numbers = await crawler.search_wo_numbers(query)
+            all_wo_numbers.update(wo_numbers)
+            
+            # Small delay between queries
+            if i < len(queries):
+                await asyncio.sleep(1.5)
+        
+        print(f"\n✅ Total WO numbers found: {len(all_wo_numbers)}")
+        
+        # Get BR numbers for each WO
+        print(f"\n📊 Extracting BR numbers from {len(all_wo_numbers)} WOs...")
+        
+        all_br_numbers = set()
+        
+        for wo in sorted(all_wo_numbers):
+            br_numbers = await crawler.get_br_from_wo(wo)
+            all_br_numbers.update(br_numbers)
+            
+            # Small delay
+            await asyncio.sleep(1.0)
+        
+        print(f"\n✅ Total BR numbers found: {len(all_br_numbers)}")
+        
+        # Print final stats
+        crawler.print_stats()
+        
+        return SearchResponse(
             molecule=request.nome_molecula,
-            dev_codes=request.dev_codes or []
+            wo_numbers=sorted(list(all_wo_numbers)),
+            br_numbers=sorted(list(all_br_numbers)),
+            summary={
+                "total_wo": len(all_wo_numbers),
+                "total_br": len(all_br_numbers),
+                "queries_executed": len(queries),
+                "parallel_execution": False,
+                "cascade_strategy": True
+            }
         )
         
-        return SearchResponse(**result)
-        
     except Exception as e:
+        print(f"\n❌ ERROR: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/proxy/status")
-async def get_proxy_status():
-    """Get detailed proxy pool status"""
-    if not crawler:
-        raise HTTPException(status_code=503, detail="Crawler not initialized")
+async def proxy_status():
+    """Get detailed proxy and key pool status"""
+    if not crawler or not proxy_manager:
+        raise HTTPException(status_code=503, detail="System not initialized")
     
-    return crawler.proxy_manager.get_status()
-
-
-@app.get("/api/status")
-async def get_status():
-    """Get complete system status"""
-    if not crawler:
-        raise HTTPException(status_code=503, detail="Crawler not initialized")
+    all_proxies = proxy_manager.get_all_proxies()
     
-    proxy_status = crawler.proxy_manager.get_status()
-    
-    # Key pool stats
-    key_stats = {
-        'total_keys': len(crawler.key_pool.keys),
-        'total_requests': crawler.key_pool.total_requests,
-        'total_success': crawler.key_pool.total_success,
-        'total_failures': crawler.key_pool.total_failures
+    # Proxy stats
+    proxy_stats = {
+        "total_proxies": len(all_proxies),
+        "healthy_proxies": len(all_proxies) - len(crawler.quarantined_proxies),
+        "quarantined_proxies": len(crawler.quarantined_proxies),
+        "total_requests": crawler.total_requests,
+        "total_successes": crawler.successful_requests,
+        "total_failures": crawler.failed_requests,
+        "global_success_rate": crawler.successful_requests / crawler.total_requests if crawler.total_requests > 0 else 0,
     }
     
+    # Top performing proxies
+    proxy_performance = []
+    for proxy in all_proxies[:10]:
+        if proxy not in crawler.quarantined_proxies:
+            failures = crawler.proxy_failures.get(proxy, 0)
+            proxy_performance.append({
+                "proxy": proxy[:30] + "...",
+                "failures": failures,
+                "status": "healthy" if failures < 3 else "at_risk"
+            })
+    
+    # Quarantined list
+    quarantined_list = [p[:30] + "..." for p in list(crawler.quarantined_proxies)[:5]]
+    
     return {
-        'system': {
-            'version': '17.0.0',
-            'engine': 'httpx + advanced proxy rotation'
-        },
-        'keys': key_stats,
-        'proxies': proxy_status
+        **proxy_stats,
+        "top_proxies": proxy_performance,
+        "quarantined_list": quarantined_list
     }
 
 
 if __name__ == "__main__":
     import uvicorn
-    import os
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)

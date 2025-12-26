@@ -77,6 +77,10 @@ class AdvancedProxyManager:
         
         print(f"📦 Proxy pool: {len(self.proxies)} proxies loaded")
     
+    def get_all_proxies(self) -> List[str]:
+        """Get all proxy URLs (for initialization)"""
+        return list(self.proxies.keys())
+    
     def _get_healthy_proxies(self) -> List[str]:
         """Get list of healthy proxies (not in quarantine)"""
         return [

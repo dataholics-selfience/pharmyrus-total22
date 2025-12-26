@@ -61,13 +61,19 @@ async def startup():
     print(f"🌐 Environment: production")
     print("=" * 70)
     
-    # Initialize proxy manager
+    # Initialize key pool manager
+    print("\n🔧 Initializing key pool manager...")
+    key_manager = KeyPoolManager()
+    
+    # Get all proxies from key pool
+    all_proxies = key_manager.get_all_proxies()
+    
+    print(f"✅ Key pool ready: {len(all_proxies)} proxies from {len(key_manager.api_keys)} keys")
+    
+    # Initialize proxy manager with proxies
     print("\n🔧 Initializing proxy manager...")
     proxy_manager = AdvancedProxyManager()
-    await proxy_manager.initialize()
-    
-    # Get all proxies
-    all_proxies = proxy_manager.get_all_proxies()
+    proxy_manager.add_proxies(all_proxies)
     
     print(f"✅ Proxy manager ready: {len(all_proxies)} proxies")
     
